@@ -50,7 +50,8 @@ local State = {
     lastLivesCheck = 0,
     autoTeleportTriggered = false,
     teleportAttempts = 0,
-    maxTeleportAttempts = 3
+    maxTeleportAttempts = 3,
+    teleportInProgress = false
 }
 
 local cache = {
@@ -59,6 +60,8 @@ local cache = {
     workspaceUpdateInterval = 0.5,
     lastPriorityCheck = 0
 }
+
+local TeleportService = game:GetService("TeleportService")
 
 local function chatMessage(str)
     if type(str) ~= "string" then str = tostring(str) end
@@ -439,10 +442,20 @@ local function attemptFire()
     end)
 end
 
+local function checkTeleportState()
+    local teleportState = TeleportService:GetLocalPlayerTeleportState()
+    return teleportState == Enum.TeleportState.RequestedFromServer or 
+           teleportState == Enum.TeleportState.InProgress or 
+           teleportState == Enum.TeleportState.Started
+end
+
 local function checkTeleportSuccess()
     task.wait(15)
     
-    if game.PlaceId == SPECIFIC_PLACE_ID then
+    local teleportState = TeleportService:GetLocalPlayerTeleportState()
+    
+    if teleportState == Enum.TeleportState.Failed or 
+       teleportState == Enum.TeleportState.None then
         return false
     end
     
@@ -708,7 +721,8 @@ return {
             AutoTeleportTriggered = State.autoTeleportTriggered,
             CurrentPlaceId = game.PlaceId,
             PlayerAlive = State.playerAlive,
-            TeleportAttempts = State.teleportAttempts
+            TeleportAttempts = State.teleportAttempts,
+            TeleportState = TeleportService:GetLocalPlayerTeleportState()
         }
     end,
     
