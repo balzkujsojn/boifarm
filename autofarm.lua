@@ -7,6 +7,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TextChatService = game:GetService("TextChatService")
 local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
 
 local CONFIG = {
     FIRE_RATE = 0.05,
@@ -60,8 +61,6 @@ local cache = {
     workspaceUpdateInterval = 0.5,
     lastPriorityCheck = 0
 }
-
-local TeleportService = game:GetService("TeleportService")
 
 local function chatMessage(str)
     if type(str) ~= "string" then str = tostring(str) end
@@ -146,7 +145,14 @@ local function checkLives()
     local livesValue = player:FindFirstChild("Lives")
     if livesValue and livesValue:IsA("StringValue") then
         local livesText = livesValue.Value
-        local livesNumber = tonumber(livesText)
+        
+        -- Try to extract number from text (might be "1" or "1/5" or similar)
+        local livesNumber
+        if livesText:match("%d+") then
+            livesNumber = tonumber(livesText:match("%d+"))
+        else
+            livesNumber = tonumber(livesText)
+        end
         
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
@@ -155,6 +161,49 @@ local function checkLives()
     end
     
     return false
+end
+
+local function useShield()
+    local now = tick()
+    
+    if now - State.lastShieldUse < State.shieldCooldown then
+        return
+    end
+    
+    local char = player.Character
+    if not char then return end
+    
+    local shield = char:FindFirstChild("Shield")
+    if not shield then return end
+    
+    local remote = shield:FindFirstChild("ShieldRemote")
+    if not remote then return end
+    
+    task.spawn(function()
+        pcall(remote.FireServer, remote)
+        State.shieldUsed = true
+        State.lastShieldUse = now
+    end)
+end
+
+local function setupHealthMonitoring()
+    local char = player.Character
+    if not char then return end
+    
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    humanoid.HealthChanged:Connect(function(health)
+        if humanoid.MaxHealth > 0 then
+            local healthPercent = (health / humanoid.MaxHealth) * 100
+            
+            if healthPercent < 50 and not State.shieldUsed and health > 0 then
+                useShield()
+            elseif healthPercent >= 50 then
+                State.shieldUsed = false
+            end
+        end
+    end)
 end
 
 local function checkAutoTeleport()
@@ -638,6 +687,8 @@ local function onCharacterAdded(character)
             equipTool()
         end
     end
+    
+    setupHealthMonitoring()
 end
 
 local function initialize()
@@ -722,7 +773,8 @@ return {
             CurrentPlaceId = game.PlaceId,
             PlayerAlive = State.playerAlive,
             TeleportAttempts = State.teleportAttempts,
-            TeleportState = TeleportService:GetLocalPlayerTeleportState()
+            TeleportState = TeleportService:GetLocalPlayerTeleportState(),
+            ShieldUsed = State.shieldUsed
         }
     end,
     
