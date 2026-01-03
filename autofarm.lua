@@ -31,10 +31,6 @@ local PRIORITY_ENEMIES = {
     ["Controller Turret"] = true
 }
 
-local SPECIAL_TARGET_POSITIONS = {
-    ["The Arbiter"] = CONFIG.ARBITER_TARGET_POSITION
-}
-
 local SPECIAL_TARGET_PARTS = {
     ["The Arbiter"] = "HumanoidRootPart"
 }
@@ -69,13 +65,14 @@ local State = {
     teleportRetryCount = 0,
     lastTeleportRetry = 0,
     autoTeleportTriggered = false,
-    waitingForRespawn = false,
-    respawnCheckTime = 0
+    livesTriggerPending = false
 }
 
-local ObjectPools = {
-    enemyCache = {},
-    workspaceCache = {}
+local cache = {
+    workspaceChildren = {},
+    lastWorkspaceUpdate = 0,
+    workspaceUpdateInterval = 1,
+    lastPriorityCheck = 0
 }
 
 local function getChatChannel()
@@ -136,8 +133,7 @@ local function checkLives()
         
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
-            State.waitingForRespawn = true
-            State.respawnCheckTime = now
+            State.livesTriggerPending = true
             return true
         end
     end
@@ -145,21 +141,84 @@ local function checkLives()
     return false
 end
 
-local function checkRespawnStatus()
-    if not State.waitingForRespawn then
+local function handleLivesTrigger()
+    if not State.livesTriggerPending then
         return false
     end
     
-    local now = tick()
+    if not State.playerAlive then
+        return false
+    end
     
-    if State.playerAlive then
-        if now - State.respawnCheckTime > CONFIG.RESPAWN_WAIT_TIME then
-            State.waitingForRespawn = false
-            return true
+    task.wait(CONFIG.RESPAWN_WAIT_TIME)
+    
+    State.livesTriggerPending = false
+    State.dungeonTriggered = true
+    State.bossCompleted = true
+    State.specialMode = true
+    State.isRunning = false
+    
+    task.wait(3)
+    
+    local tool = getValidTool()
+    if tool and tool.Tool then
+        tool.Tool.Parent = player.Backpack
+    end
+    
+    task.wait(1)
+    
+    local character = player.Character
+    if character then
+        local artifact = character:FindFirstChild("Mysterious Artifact")
+        if not artifact then
+            local backpack = player:FindFirstChild("Backpack")
+            if backpack then
+                artifact = backpack:FindFirstChild("Mysterious Artifact")
+                if artifact then
+                    artifact.Parent = character
+                end
+            end
+        end
+        
+        if artifact then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid:EquipTool(artifact)
+            end
         end
     end
     
-    return false
+    task.wait(2)
+    
+    pcall(function()
+        local args = {
+            [1] = "createParty",
+            [2] = {
+                ["settings"] = {
+                    ["FriendsOnly"] = false,
+                    ["Visual"] = true
+                },
+                ["subplace"] = "Stronghold"
+            }
+        }
+        
+        local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
+        partyRemote:InvokeServer(unpack(args))
+    end)
+    
+    task.wait(3)
+    
+    pcall(function()
+        local args = {
+            [1] = "joinSubplace",
+            [2] = {}
+        }
+        
+        local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
+        partyRemote:InvokeServer(unpack(args))
+    end)
+    
+    return true
 end
 
 local function checkAutoTeleport()
@@ -197,19 +256,6 @@ local function checkTeleportState()
     return false
 end
 
-local function checkArbiterSpawned()
-    local now = tick()
-    if now - State.lastArbiterCheck < 1 then
-        return State.arbiterSpawned
-    end
-    
-    State.lastArbiterCheck = now
-    local arbiter = workspace:FindFirstChild("The Arbiter")
-    State.arbiterSpawned = arbiter ~= nil
-    
-    return State.arbiterSpawned
-end
-
 local function getTargetPart(model)
     local enemyName = model.Name
     
@@ -235,13 +281,6 @@ local function cleanConnectionPool()
         end
     end
 end
-
-local cache = {
-    workspaceChildren = {},
-    lastWorkspaceUpdate = 0,
-    workspaceUpdateInterval = 1,
-    lastPriorityCheck = 0
-}
 
 local function findEnemies()
     if not State.playerAlive then return {} end
@@ -720,20 +759,9 @@ local function farmingLoop()
             end
             
             if checkLives() then
-                State.isRunning = false
-                while not State.playerAlive do
-                    task.wait(0.5)
-                    State.playerAlive = isPlayerAlive()
+                if State.livesTriggerPending then
+                    task.spawn(handleLivesTrigger)
                 end
-                
-                task.wait(CONFIG.RESPAWN_WAIT_TIME)
-                handleBossCompletion()
-                break
-            end
-            
-            if checkRespawnStatus() then
-                handleBossCompletion()
-                break
             end
             
             if checkTeleportState() then
@@ -865,8 +893,7 @@ return {
     
     ForceCleanup = function()
         cleanConnectionPool()
-        ObjectPools.enemyCache = {}
-        ObjectPools.workspaceCache = {}
+        cache.workspaceChildren = {}
     end,
     
     ForceSkipCommands = function()
@@ -896,12 +923,12 @@ return {
             CurrentTarget = State.currentTarget and State.currentTarget.Name or "None",
             LivesValue = currentLives,
             LivesTriggered = State.livesChecked,
+            LivesPending = State.livesTriggerPending,
             DungeonTriggered = State.dungeonTriggered,
             TeleportState = teleportState,
             TeleportRetryCount = State.teleportRetryCount,
             AutoTeleportTriggered = State.autoTeleportTriggered,
             CurrentPlaceId = game.PlaceId,
-            WaitingForRespawn = State.waitingForRespawn,
             PlayerAlive = State.playerAlive
         }
     end,
