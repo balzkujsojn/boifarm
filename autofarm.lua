@@ -21,7 +21,7 @@ local CONFIG = {
     ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554),
     LIVES_CHECK_INTERVAL = 5,
     TELEPORT_RETRY_INTERVAL = 10,
-    RESPAWN_WAIT_TIME = 3
+    RESPAWN_WAIT_TIME = 1
 }
 
 local PRIORITY_ENEMIES = {
@@ -210,27 +210,7 @@ local function checkArbiterSpawned()
     return State.arbiterSpawned
 end
 
-local function getTargetPositionForEnemy(enemyName, enemyModel)
-    if SPECIAL_TARGET_POSITIONS[enemyName] then
-        return SPECIAL_TARGET_POSITIONS[enemyName]
-    end
-    
-    local specialPartName = SPECIAL_TARGET_PARTS[enemyName]
-    if specialPartName then
-        local specialPart = enemyModel:FindFirstChild(specialPartName)
-        if specialPart then
-            return specialPart.Position
-        end
-    end
-    
-    return enemyModel:FindFirstChild("HumanoidRootPart") or 
-           enemyModel:FindFirstChild("Torso") or 
-           enemyModel:FindFirstChild("UpperTorso") or
-           enemyModel:FindFirstChild("Head") or
-           enemyModel:FindFirstChild("Chest")
-end
-
-local function getTargetPartForValidation(model)
+local function getTargetPart(model)
     local enemyName = model.Name
     
     if SPECIAL_TARGET_PARTS[enemyName] then
@@ -256,37 +236,39 @@ local function cleanConnectionPool()
     end
 end
 
-local function updateWorkspaceCache()
-    local now = tick()
-    if now - State.lastWorldUpdate > CONFIG.WORLD_UPDATE_INTERVAL then
-        ObjectPools.workspaceCache = workspace:GetChildren()
-        State.lastWorldUpdate = now
-        return true
-    end
-    return false
-end
+local cache = {
+    workspaceChildren = {},
+    lastWorkspaceUpdate = 0,
+    workspaceUpdateInterval = 1,
+    lastPriorityCheck = 0
+}
 
 local function findEnemies()
-    if not State.playerAlive then return ObjectPools.enemyCache end
+    if not State.playerAlive then return {} end
     
-    updateWorkspaceCache()
+    local now = tick()
+    local forceUpdate = false
     
-    for i = #ObjectPools.enemyCache, 1, -1 do
-        ObjectPools.enemyCache[i] = nil
+    if now - cache.lastPriorityCheck > 0.5 then
+        forceUpdate = true
+        cache.lastPriorityCheck = now
     end
     
-    local priorityEnemies = {}
-    local regularEnemies = {}
+    if forceUpdate or now - cache.lastWorkspaceUpdate > cache.workspaceUpdateInterval then
+        cache.workspaceChildren = workspace:GetChildren()
+        cache.lastWorkspaceUpdate = now
+    end
     
-    for _, model in ipairs(ObjectPools.workspaceCache) do
-        if not State.isRunning then break end
-        
+    local enemies = {}
+    local priorityEnemies = {}
+    
+    for _, model in ipairs(cache.workspaceChildren) do
         if model:IsA("Model") and model.Parent == workspace then
             local enemyMain = model:FindFirstChild("EnemyMain")
             local humanoid = model:FindFirstChildOfClass("Humanoid")
             
             if enemyMain and humanoid and humanoid.Health > 0 then
-                local targetPart = getTargetPartForValidation(model)
+                local targetPart = getTargetPart(model)
                 if targetPart then
                     local enemyData = {
                         Model = model,
@@ -295,7 +277,7 @@ local function findEnemies()
                         Position = targetPart.Position,
                         Name = model.Name,
                         IsPriority = PRIORITY_ENEMIES[model.Name] == true,
-                        LastSeen = tick()
+                        LastSeen = now
                     }
                     
                     if model.Name == "Gilgamesh, the Consumer of Reality" or 
@@ -308,7 +290,7 @@ local function findEnemies()
                     if enemyData.IsPriority then
                         table.insert(priorityEnemies, enemyData)
                     else
-                        table.insert(regularEnemies, enemyData)
+                        table.insert(enemies, enemyData)
                     end
                 end
             end
@@ -316,12 +298,10 @@ local function findEnemies()
     end
     
     if #priorityEnemies > 0 then
-        ObjectPools.enemyCache = priorityEnemies
-    else
-        ObjectPools.enemyCache = regularEnemies
+        return priorityEnemies
     end
     
-    return ObjectPools.enemyCache
+    return enemies
 end
 
 local function selectTarget()
@@ -581,6 +561,7 @@ local function setupDeathMonitoring()
             task.wait(1.5)
             if State.isRunning and not State.specialMode and not State.bossCompleted then
                 equipTool()
+                cache.lastPriorityCheck = 0
                 State.shieldUsed = false
             end
         end
@@ -814,6 +795,7 @@ local function onCharacterAdded(character)
     if State.isRunning and not State.specialMode and not State.bossCompleted then
         if isPlayerAlive() then
             equipTool()
+            cache.lastPriorityCheck = 0
         end
     end
 end
@@ -832,8 +814,7 @@ local function initialize()
     task.spawn(function()
         while State.isRunning and not State.bossCompleted do
             task.wait(60)
-            ObjectPools.workspaceCache = {}
-            ObjectPools.enemyCache = {}
+            cache.workspaceChildren = {}
             cleanConnectionPool()
         end
     end)
