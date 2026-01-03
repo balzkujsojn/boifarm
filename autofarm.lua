@@ -11,8 +11,7 @@ local TweenService = game:GetService("TweenService")
 local CONFIG = {
     FIRE_RATE = 0.05,
     TOOL_NAME = "Equinox Cannon",
-    REMOTE_NAME = "RemoteFunction",
-    LIVES_CHECK_INTERVAL = 5
+    REMOTE_NAME = "RemoteFunction"
 }
 
 local PRIORITY_ENEMIES = {
@@ -29,6 +28,8 @@ local SPECIAL_TARGET_PARTS = {
 local TELEPORT_POSITION = Vector3.new(-21, 103, -469)
 local SPECIFIC_PLACE_ID = 96516249626799
 local AUTOTELEPORT_PLACE_ID = 8811271345
+
+local ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554)
 
 local State = {
     isRunning = true,
@@ -57,29 +58,6 @@ local cache = {
     lastPriorityCheck = 0
 }
 
-local function getChatChannel()
-    if TextChatService.ChatVersion == Enum.ChatVersion.LegacyChatService then
-        return nil
-    end
-    
-    local channel = TextChatService:FindFirstChild("TextChannels")
-    if channel then
-        channel = channel:FindFirstChild("RBXGeneral")
-        if channel and channel:IsA("TextChannel") then
-            return channel
-        end
-    end
-    
-    for _, child in pairs(TextChatService:GetChildren()) do
-        if child:IsA("TextChannel") then
-            return child
-        end
-    end
-    
-    return nil
-end
-
-local chatChannel = getChatChannel()
 local function chatMessage(str)
     if type(str) ~= "string" then str = tostring(str) end
     
@@ -93,10 +71,16 @@ local function chatMessage(str)
                 end)
             end
         end
-    elseif chatChannel then
-        task.spawn(function()
-            pcall(chatChannel.SendAsync, chatChannel, str)
-        end)
+    else
+        local channel = TextChatService:FindFirstChild("TextChannels")
+        if channel then
+            channel = channel:FindFirstChild("RBXGeneral")
+            if channel and channel:IsA("TextChannel") then
+                task.spawn(function()
+                    pcall(channel.SendAsync, channel, str)
+                end)
+            end
+        end
     end
 end
 
@@ -171,7 +155,7 @@ end
 
 local function checkLives()
     local now = tick()
-    if now - State.lastLivesCheck < CONFIG.LIVES_CHECK_INTERVAL then
+    if now - State.lastLivesCheck < 5 then
         return false
     end
     
@@ -202,55 +186,6 @@ local function checkAutoTeleport()
     end
     
     return false
-end
-
-local function setupHealthMonitoring()
-    local char = player.Character
-    if not char then return end
-    
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
-    
-    local maxHealth = humanoid.MaxHealth
-    
-    humanoid.HealthChanged:Connect(function(currentHealth)
-        if currentHealth > 0 and maxHealth > 0 then
-            local healthPercent = (currentHealth / maxHealth) * 100
-            
-            if healthPercent < 50 and not State.shieldUsed then
-                useShield()
-            elseif healthPercent >= 50 then
-                State.shieldUsed = false
-            end
-        end
-    end)
-end
-
-local function setupDeathMonitoring()
-    local char = player.Character
-    if not char then return end
-    
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
-    
-    humanoid.HealthChanged:Connect(function(health)
-        local wasAlive = State.playerAlive
-        State.playerAlive = health > 0
-        
-        if health <= 0 and wasAlive then
-            State.currentTarget = nil
-            State.shieldUsed = false
-        elseif health > 0 and not wasAlive then
-            task.wait(1.5)
-            if State.isRunning and not State.specialMode and not State.bossCompleted then
-                equipTool()
-                cache.lastPriorityCheck = 0
-                State.shieldUsed = false
-            end
-        end
-    end)
-    
-    State.playerAlive = humanoid.Health > 0
 end
 
 local function getTargetPart(model)
@@ -472,8 +407,13 @@ local function attemptFire()
     
     State.lastFireTime = now
     
-    local targetPart = State.currentTarget.TargetPart
-    local targetPos = targetPart.Position
+    local targetPos
+    if State.currentTarget.Name == "The Arbiter" then
+        targetPos = ARBITER_TARGET_POSITION
+    else
+        local targetPart = State.currentTarget.TargetPart
+        targetPos = targetPart.Position
+    end
     
     local camera = workspace.CurrentCamera
     if not camera then return end
@@ -657,9 +597,6 @@ end
 
 local function onCharacterAdded(character)
     task.wait(2)
-    
-    setupDeathMonitoring()
-    setupHealthMonitoring()
     
     if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
         task.wait(1)
