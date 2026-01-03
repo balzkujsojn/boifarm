@@ -29,6 +29,7 @@ local SPECIAL_TARGET_PARTS = {
 local TELEPORT_POSITION = Vector3.new(-21, 103, -469)
 local SPECIFIC_PLACE_ID = 96516249626799
 local AUTOTELEPORT_PLACE_ID = 8811271345
+local REJOIN_GAME_ID = 8811271345  -- Balanced Craftwars Overhaul
 
 local ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554)
 
@@ -52,7 +53,9 @@ local State = {
     autoTeleportTriggered = false,
     teleportAttempts = 0,
     maxTeleportAttempts = 3,
-    teleportInProgress = false
+    teleportInProgress = false,
+    rejoinAttempts = 0,
+    maxRejoinAttempts = 5
 }
 
 local cache = {
@@ -620,6 +623,38 @@ local function checkBossStatus()
     end
 end
 
+local function attemptRejoinGame()
+    State.rejoinAttempts = State.rejoinAttempts + 1
+    
+    if State.rejoinAttempts > State.maxRejoinAttempts then
+        return false
+    end
+    
+    task.wait(2)
+    
+    local success = pcall(function()
+        TeleportService:Teleport(REJOIN_GAME_ID, player)
+        return true
+    end)
+    
+    if not success then
+        task.wait(5)
+        return attemptRejoinGame()
+    end
+    
+    return true
+end
+
+local function setupKickDetection()
+    Players.PlayerRemoving:Connect(function(removedPlayer)
+        if removedPlayer == player then
+            State.isRunning = false
+            task.wait(1)
+            attemptRejoinGame()
+        end
+    end)
+end
+
 local function farmingLoop()
     local lastBossCheck = 0
     local bossCheckInterval = 2
@@ -689,6 +724,8 @@ local function initialize()
     end
     
     player.CharacterAdded:Connect(onCharacterAdded)
+    
+    setupKickDetection()
     
     onCharacterAdded(player.Character)
     
@@ -766,7 +803,8 @@ return {
             PlayerAlive = State.playerAlive,
             TeleportAttempts = State.teleportAttempts,
             TeleportState = TeleportService:GetLocalPlayerTeleportState(),
-            ShieldUsed = State.shieldUsed
+            ShieldUsed = State.shieldUsed,
+            RejoinAttempts = State.rejoinAttempts
         }
     end,
     
@@ -774,5 +812,9 @@ return {
         if not State.bossCompleted then
             handleDungeonTeleport()
         end
+    end,
+    
+    RejoinGame = function()
+        attemptRejoinGame()
     end
 }
