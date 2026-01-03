@@ -57,7 +57,8 @@ local State = {
     shootingErrors = 0,
     maxShootingErrors = 10,
     lastToolEquipTime = 0,
-    toolEquipCooldown = 2
+    toolEquipCooldown = 2,
+    arbiterPresent = false
 }
 
 local cache = {
@@ -270,6 +271,7 @@ local function findEnemies()
     
     local enemies = {}
     local priorityEnemies = {}
+    local hasArbiter = false
     
     for _, model in ipairs(cache.workspaceChildren) do
         if model:IsA("Model") and model.Parent == workspace then
@@ -294,8 +296,14 @@ local function findEnemies()
                             Position = targetPart.Position,
                             Name = model.Name,
                             IsPriority = PRIORITY_ENEMIES[model.Name] == true,
-                            LastSeen = now
+                            LastSeen = now,
+                            IsArbiter = model.Name == "The Arbiter"
                         }
+                        
+                        if enemyData.IsArbiter then
+                            hasArbiter = true
+                            enemyData.IsPriority = true
+                        end
                         
                         if model.Name == "Gilgamesh, the Consumer of Reality" or 
                            model.Name == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
@@ -312,6 +320,8 @@ local function findEnemies()
             end
         end
     end
+    
+    State.arbiterPresent = hasArbiter
     
     if #priorityEnemies > 0 then
         return priorityEnemies
@@ -467,6 +477,9 @@ local function attemptFire()
         return
     end
     
+    -- Check if target is The Arbiter
+    local isArbiter = State.currentTarget.Name == "The Arbiter"
+    
     local toolData
     local toolSuccess, toolResult = pcall(function()
         toolData = getValidTool()
@@ -512,7 +525,8 @@ local function attemptFire()
     State.lastFireTime = now
     
     local targetPos
-    if State.currentTarget.Name == "The Arbiter" then
+    if isArbiter then
+        -- Always use fixed position for The Arbiter
         targetPos = ARBITER_TARGET_POSITION
     else
         local targetPart = State.currentTarget.TargetPart
@@ -540,6 +554,14 @@ local function attemptFire()
     
     if not fireSuccess then
         State.shootingErrors = State.shootingErrors + 1
+        
+        -- If it's The Arbiter and we're getting errors, try alternative targeting
+        if isArbiter then
+            task.wait(0.1)
+            pcall(function()
+                toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
+            end)
+        end
         
         if State.shootingErrors > State.maxShootingErrors then
             State.shootingEnabled = false
@@ -773,6 +795,7 @@ local function onCharacterAdded(character)
     
     State.shootingEnabled = true
     State.shootingErrors = 0
+    State.arbiterPresent = false
 end
 
 local function initialize()
@@ -873,7 +896,8 @@ return {
             ShootingEnabled = State.shootingEnabled,
             ShootingErrors = State.shootingErrors,
             LastShotTime = State.lastFireTime,
-            TimeSinceLastShot = tick() - State.lastFireTime
+            TimeSinceLastShot = tick() - State.lastFireTime,
+            ArbiterPresent = State.arbiterPresent
         }
     end,
     
