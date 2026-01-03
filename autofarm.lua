@@ -52,7 +52,12 @@ local State = {
     autoTeleportTriggered = false,
     teleportAttempts = 0,
     maxTeleportAttempts = 3,
-    teleportInProgress = false
+    teleportInProgress = false,
+    shootingEnabled = true,
+    shootingErrors = 0,
+    maxShootingErrors = 10,
+    lastToolEquipTime = 0,
+    toolEquipCooldown = 2
 }
 
 local cache = {
@@ -136,7 +141,7 @@ end
 
 local function checkLives()
     local now = tick()
-    if now - State.lastLivesCheck < 2 then  -- Check more frequently (2 seconds)
+    if now - State.lastLivesCheck < 2 then
         return false
     end
     
@@ -146,13 +151,11 @@ local function checkLives()
     if livesValue and livesValue:IsA("NumberValue") then
         local livesNumber = livesValue.Value
         
-        -- If lives reach 1, trigger dungeon teleport
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
             return true
         end
         
-        -- Reset trigger if lives go back above 1 (for testing or if revived)
         if livesNumber > 1 then
             State.livesChecked = false
         end
@@ -254,7 +257,7 @@ local function getTargetPart(model)
 end
 
 local function findEnemies()
-    if not State.playerAlive then 
+    if not State.playerAlive or not State.shootingEnabled then 
         return {}
     end
     
@@ -318,7 +321,7 @@ local function findEnemies()
 end
 
 local function selectTarget()
-    if not State.playerAlive then 
+    if not State.playerAlive or not State.shootingEnabled then 
         return nil
     end
     
@@ -366,7 +369,7 @@ local function selectTarget()
 end
 
 local function getValidTool()
-    if not State.playerAlive then 
+    if not State.playerAlive or not State.shootingEnabled then 
         return nil 
     end
     
@@ -391,9 +394,15 @@ local function getValidTool()
 end
 
 local function equipTool()
+    local now = tick()
+    
     if not State.playerAlive then 
         task.wait(0.5)
         return equipTool()
+    end
+    
+    if now - State.lastToolEquipTime < State.toolEquipCooldown then
+        return false
     end
     
     local character = player.Character
@@ -411,6 +420,7 @@ local function equipTool()
     local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
     if tool then
         humanoid:EquipTool(tool)
+        State.lastToolEquipTime = now
         return true
     end
     
@@ -421,6 +431,7 @@ local function equipTool()
             tool.Parent = character
             task.wait(0.1)
             humanoid:EquipTool(tool)
+            State.lastToolEquipTime = now
             return true
         end
     end
@@ -432,26 +443,65 @@ local function attemptFire()
     if not State.isRunning or State.specialMode or State.bossCompleted then 
         return 
     end
-    if not State.playerAlive then 
+    if not State.playerAlive or not State.shootingEnabled then 
         return 
     end
     
-    State.currentTarget = selectTarget()
-    if not State.currentTarget then
+    local success, targetResult = pcall(function()
+        State.currentTarget = selectTarget()
+        return State.currentTarget
+    end)
+    
+    if not success then
+        State.shootingErrors = State.shootingErrors + 1
+        if State.shootingErrors > State.maxShootingErrors then
+            State.shootingEnabled = false
+            task.wait(5)
+            State.shootingEnabled = true
+            State.shootingErrors = 0
+        end
         return
     end
     
-    local toolData = getValidTool()
-    if not toolData then 
-        local equipped = equipTool()
-        if not equipped then 
+    if not targetResult then
+        return
+    end
+    
+    local toolData
+    local toolSuccess, toolResult = pcall(function()
+        toolData = getValidTool()
+        return toolData
+    end)
+    
+    if not toolSuccess then
+        State.shootingErrors = State.shootingErrors + 1
+        return
+    end
+    
+    if not toolResult then 
+        local equipSuccess, equipResult = pcall(function()
+            return equipTool()
+        end)
+        
+        if not equipSuccess then
+            State.shootingErrors = State.shootingErrors + 1
+            return
+        end
+        
+        if not equipResult then 
             return 
         end
         
-        toolData = getValidTool()
-        if not toolData then 
+        local toolRetrySuccess, toolRetryResult = pcall(function()
+            toolData = getValidTool()
+            return toolData
+        end)
+        
+        if not toolRetrySuccess or not toolRetryResult then 
             return 
         end
+        
+        toolData = toolRetryResult
     end
     
     local now = tick()
@@ -484,9 +534,22 @@ local function attemptFire()
     local startPos = targetPos - (direction * 5)
     local endPos = targetPos
     
-    pcall(function()
+    local fireSuccess = pcall(function()
         toolData.Remote:InvokeServer("fire", {startPos, endPos, State.chargeValue})
     end)
+    
+    if not fireSuccess then
+        State.shootingErrors = State.shootingErrors + 1
+        
+        if State.shootingErrors > State.maxShootingErrors then
+            State.shootingEnabled = false
+            task.wait(3)
+            State.shootingEnabled = true
+            State.shootingErrors = 0
+        end
+    else
+        State.shootingErrors = 0
+    end
 end
 
 local function checkTeleportState()
@@ -517,6 +580,7 @@ local function attemptDungeonTeleport()
     State.bossCompleted = true
     State.specialMode = true
     State.isRunning = false
+    State.shootingEnabled = false
     
     task.wait(3)
     
@@ -599,6 +663,7 @@ local function handleDungeonTeleport()
         State.specialMode = false
         State.isRunning = true
         State.livesChecked = false
+        State.shootingEnabled = true
     end
 end
 
@@ -626,9 +691,22 @@ local function checkBossStatus()
     end
 end
 
+local function shootingRecoveryCheck()
+    local lastShotTime = State.lastFireTime
+    local currentTime = tick()
+    
+    if State.shootingEnabled and State.isRunning and not State.bossCompleted and State.playerAlive then
+        if currentTime - lastShotTime > 10 then
+            State.shootingErrors = State.maxShootingErrors + 1
+        end
+    end
+end
+
 local function farmingLoop()
     local lastBossCheck = 0
     local bossCheckInterval = 2
+    local lastRecoveryCheck = 0
+    local recoveryCheckInterval = 5
     
     while State.isRunning and not State.bossCompleted do
         local now = tick()
@@ -636,7 +714,6 @@ local function farmingLoop()
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
-            -- Check lives FIRST (highest priority)
             if checkLives() then
                 handleDungeonTeleport()
                 break
@@ -656,6 +733,11 @@ local function farmingLoop()
                 end
                 
                 lastBossCheck = now
+            end
+            
+            if now - lastRecoveryCheck > recoveryCheckInterval then
+                shootingRecoveryCheck()
+                lastRecoveryCheck = now
             end
             
             attemptFire()
@@ -688,6 +770,9 @@ local function onCharacterAdded(character)
     end
     
     setupHealthMonitoring()
+    
+    State.shootingEnabled = true
+    State.shootingErrors = 0
 end
 
 local function initialize()
@@ -733,34 +818,27 @@ task.spawn(function()
     end
 end)
 
--- Debug function to manually check lives
-local function debugCheckLives()
-    local livesValue = player:FindFirstChild("Lives")
-    if livesValue and livesValue:IsA("NumberValue") then
-        print("[DEBUG] Current lives:", livesValue.Value)
-        print("[DEBUG] Lives checked flag:", State.livesChecked)
-        print("[DEBUG] Boss completed:", State.bossCompleted)
-        print("[DEBUG] Is running:", State.isRunning)
-        
-        if livesValue.Value == 1 and not State.bossCompleted and State.isRunning then
-            print("[DEBUG] Lives at 1, triggering dungeon teleport...")
-            handleDungeonTeleport()
-        end
-    else
-        print("[DEBUG] Lives value not found!")
-    end
-end
-
 return {
     Stop = function()
         State.isRunning = false
+        State.shootingEnabled = false
     end,
     
     Start = function()
         if not State.isRunning then
             State.isRunning = true
+            State.shootingEnabled = true
             task.spawn(farmingLoop)
         end
+    end,
+    
+    EnableShooting = function()
+        State.shootingEnabled = true
+        State.shootingErrors = 0
+    end,
+    
+    DisableShooting = function()
+        State.shootingEnabled = false
     end,
     
     EquipTool = equipTool,
@@ -791,7 +869,11 @@ return {
             PlayerAlive = State.playerAlive,
             TeleportAttempts = State.teleportAttempts,
             TeleportState = TeleportService:GetLocalPlayerTeleportState(),
-            ShieldUsed = State.shieldUsed
+            ShieldUsed = State.shieldUsed,
+            ShootingEnabled = State.shootingEnabled,
+            ShootingErrors = State.shootingErrors,
+            LastShotTime = State.lastFireTime,
+            TimeSinceLastShot = tick() - State.lastFireTime
         }
     end,
     
@@ -801,5 +883,10 @@ return {
         end
     end,
     
-    DebugCheckLives = debugCheckLives  -- Added for debugging
+    ResetShooting = function()
+        State.shootingEnabled = true
+        State.shootingErrors = 0
+        State.lastFireTime = 0
+        equipTool()
+    end
 }
