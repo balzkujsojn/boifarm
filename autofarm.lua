@@ -9,7 +9,7 @@ local TextChatService = game:GetService("TextChatService")
 local TweenService = game:GetService("TweenService")
 
 local CONFIG = {
-    FIRE_RATE = 0.05,
+    FIRE_RATE = 0.05,  -- 20 shots per second
     TOOL_NAME = "Equinox Cannon",
     REMOTE_NAME = "RemoteFunction"
 }
@@ -54,9 +54,14 @@ local State = {
 local cache = {
     workspaceChildren = {},
     lastWorkspaceUpdate = 0,
-    workspaceUpdateInterval = 1,
+    workspaceUpdateInterval = 0.5,  -- Reduced for faster updates
     lastPriorityCheck = 0
 }
+
+-- Debug function
+local function debugPrint(message)
+    warn("[AutoFarm] " .. message)
+end
 
 local function chatMessage(str)
     if type(str) ~= "string" then str = tostring(str) end
@@ -91,6 +96,7 @@ local function sendSkipCommands()
     task.spawn(function()
         if not State.skipAllSaid then
             task.wait(0.5)
+            debugPrint("Sending /skipall...")
             chatMessage("/skipall")
             State.skipAllSaid = true
         end
@@ -98,6 +104,7 @@ local function sendSkipCommands()
         task.wait(1)
         
         if not State.skipSaid then
+            debugPrint("Sending /skip...")
             chatMessage("/skip")
             State.skipSaid = true
         end
@@ -115,33 +122,11 @@ local function teleportToPosition()
     if not hrp then return end
     
     State.teleported = true
+    debugPrint("Teleporting to position...")
     
     local tweenInfo = TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     local tween = TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(TELEPORT_POSITION)})
     tween:Play()
-end
-
-local function useShield()
-    local now = tick()
-    
-    if now - State.lastShieldUse < State.shieldCooldown then
-        return
-    end
-    
-    local char = player.Character
-    if not char then return end
-    
-    local shield = char:FindFirstChild("Shield")
-    if not shield then return end
-    
-    local remote = shield:FindFirstChild("ShieldRemote")
-    if not remote then return end
-    
-    task.spawn(function()
-        pcall(remote.FireServer, remote)
-        State.shieldUsed = true
-        State.lastShieldUse = now
-    end)
 end
 
 local function isPlayerAlive()
@@ -151,41 +136,6 @@ local function isPlayerAlive()
     if not humanoid then return false end
     
     return humanoid.Health > 0
-end
-
-local function checkLives()
-    local now = tick()
-    if now - State.lastLivesCheck < 5 then
-        return false
-    end
-    
-    State.lastLivesCheck = now
-    
-    local livesValue = player:FindFirstChild("Lives")
-    if livesValue and livesValue:IsA("StringValue") then
-        local livesText = livesValue.Value
-        local livesNumber = tonumber(livesText)
-        
-        if livesNumber == 1 and not State.livesChecked then
-            State.livesChecked = true
-            return true
-        end
-    end
-    
-    return false
-end
-
-local function checkAutoTeleport()
-    if State.autoTeleportTriggered then
-        return false
-    end
-    
-    if game.PlaceId == AUTOTELEPORT_PLACE_ID then
-        State.autoTeleportTriggered = true
-        return true
-    end
-    
-    return false
 end
 
 local function getTargetPart(model)
@@ -198,25 +148,43 @@ local function getTargetPart(model)
         end
     end
     
-    return model:FindFirstChild("HumanoidRootPart") or 
-           model:FindFirstChild("Torso") or 
-           model:FindFirstChild("UpperTorso") or
-           model:FindFirstChild("Head") or
-           model:FindFirstChild("Chest")
+    -- Try multiple possible part names
+    local possibleParts = {
+        "HumanoidRootPart",
+        "Head",
+        "Torso", 
+        "UpperTorso",
+        "LowerTorso",
+        "Chest",
+        "Body"
+    }
+    
+    for _, partName in ipairs(possibleParts) do
+        local part = model:FindFirstChild(partName)
+        if part and part:IsA("BasePart") then
+            return part
+        end
+    end
+    
+    -- If no standard part found, try to find any BasePart
+    for _, child in ipairs(model:GetChildren()) do
+        if child:IsA("BasePart") then
+            return child
+        end
+    end
+    
+    return nil
 end
 
 local function findEnemies()
-    if not State.playerAlive then return {} end
-    
-    local now = tick()
-    local forceUpdate = false
-    
-    if now - cache.lastPriorityCheck > 0.5 then
-        forceUpdate = true
-        cache.lastPriorityCheck = now
+    if not State.playerAlive then 
+        return {}
     end
     
-    if forceUpdate or now - cache.lastWorkspaceUpdate > cache.workspaceUpdateInterval then
+    local now = tick()
+    
+    -- Update cache less frequently for performance
+    if now - cache.lastWorkspaceUpdate > cache.workspaceUpdateInterval then
         cache.workspaceChildren = workspace:GetChildren()
         cache.lastWorkspaceUpdate = now
     end
@@ -226,46 +194,66 @@ local function findEnemies()
     
     for _, model in ipairs(cache.workspaceChildren) do
         if model:IsA("Model") and model.Parent == workspace then
-            local enemyMain = model:FindFirstChild("EnemyMain")
             local humanoid = model:FindFirstChildOfClass("Humanoid")
             
-            if enemyMain and humanoid and humanoid.Health > 0 then
-                local targetPart = getTargetPart(model)
-                if targetPart then
-                    local enemyData = {
-                        Model = model,
-                        Humanoid = humanoid,
-                        TargetPart = targetPart,
-                        Position = targetPart.Position,
-                        Name = model.Name,
-                        IsPriority = PRIORITY_ENEMIES[model.Name] == true,
-                        LastSeen = now
-                    }
-                    
-                    if model.Name == "Gilgamesh, the Consumer of Reality" or 
-                       model.Name == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
-                        State.bossHasSpawned = true
+            -- Check if it's an enemy by checking health and if it has EnemyMain or other indicators
+            if humanoid and humanoid.Health > 0 then
+                -- Check if it's an enemy (not a player)
+                local isPlayerCharacter = false
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if plr.Character == model then
+                        isPlayerCharacter = true
+                        break
                     end
-                    
-                    if enemyData.IsPriority then
-                        table.insert(priorityEnemies, enemyData)
-                    else
-                        table.insert(enemies, enemyData)
+                end
+                
+                if not isPlayerCharacter then
+                    local targetPart = getTargetPart(model)
+                    if targetPart then
+                        local enemyData = {
+                            Model = model,
+                            Humanoid = humanoid,
+                            TargetPart = targetPart,
+                            Position = targetPart.Position,
+                            Name = model.Name,
+                            IsPriority = PRIORITY_ENEMIES[model.Name] == true,
+                            LastSeen = now
+                        }
+                        
+                        -- Check for boss spawns
+                        if model.Name == "Gilgamesh, the Consumer of Reality" or 
+                           model.Name == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
+                            State.bossHasSpawned = true
+                            debugPrint("Boss detected: " .. model.Name)
+                        end
+                        
+                        if enemyData.IsPriority then
+                            table.insert(priorityEnemies, enemyData)
+                        else
+                            table.insert(enemies, enemyData)
+                        end
                     end
                 end
             end
         end
     end
     
+    -- Return priority enemies first, then regular enemies
     if #priorityEnemies > 0 then
+        debugPrint("Found " .. #priorityEnemies .. " priority enemies")
         return priorityEnemies
+    elseif #enemies > 0 then
+        debugPrint("Found " .. #enemies .. " regular enemies")
+        return enemies
     end
     
-    return enemies
+    return {}
 end
 
 local function selectTarget()
-    if not State.playerAlive then return nil end
+    if not State.playerAlive then 
+        return nil
+    end
     
     local enemies = findEnemies()
     
@@ -273,42 +261,37 @@ local function selectTarget()
         return nil
     end
     
+    -- Check if current target is still valid
     if State.currentTarget then
         local targetModel = State.currentTarget.Model
         if targetModel and targetModel.Parent then
             local humanoid = targetModel:FindFirstChildOfClass("Humanoid")
             if humanoid and humanoid.Health > 0 then
+                -- If we have a priority target, keep it
                 if State.currentTarget.IsPriority then
-                    return State.currentTarget
-                end
-                
-                local hasPriority = false
-                for _, enemy in ipairs(enemies) do
-                    if enemy.IsPriority then
-                        hasPriority = true
-                        break
-                    end
-                end
-                
-                if not hasPriority then
                     return State.currentTarget
                 end
             end
         end
     end
     
+    -- Select new target
     local character = player.Character
-    if not character then return enemies[1] end
+    if not character then 
+        return enemies[1] 
+    end
     
     local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-    if not humanoidRootPart then return enemies[1] end
+    if not humanoidRootPart then 
+        return enemies[1] 
+    end
     
     local playerPos = humanoidRootPart.Position
     local closestEnemy = enemies[1]
     local closestDistance = math.huge
     
-    for i = 1, math.min(#enemies, 15) do
-        local enemy = enemies[i]
+    -- Find closest enemy
+    for _, enemy in ipairs(enemies) do
         local distance = (enemy.Position - playerPos).Magnitude
         if distance < closestDistance then
             closestDistance = distance
@@ -316,17 +299,24 @@ local function selectTarget()
         end
     end
     
+    debugPrint("Selected target: " .. closestEnemy.Name .. " (Distance: " .. math.floor(closestDistance) .. ")")
     return closestEnemy
 end
 
 local function getValidTool()
-    if not State.playerAlive then return nil end
+    if not State.playerAlive then 
+        return nil 
+    end
     
     local character = player.Character
-    if not character then return nil end
+    if not character then 
+        return nil 
+    end
     
     local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
-    if not tool then return nil end
+    if not tool then 
+        return nil 
+    end
     
     local remote = tool:FindFirstChild(CONFIG.REMOTE_NAME)
     local handle = tool:FindFirstChild("Handle")
@@ -356,105 +346,118 @@ local function equipTool()
         return equipTool()
     end
     
+    -- Check if tool is already equipped
     local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
-    if not tool then
-        local backpack = player:FindFirstChild("Backpack")
-        if backpack then
-            tool = backpack:FindFirstChild(CONFIG.TOOL_NAME)
-            if tool then
-                tool.Parent = character
-            else
-                return false
-            end
-        else
-            task.wait(0.5)
-            return equipTool()
-        end
-    end
-    
     if tool then
         humanoid:EquipTool(tool)
-        task.wait(0.2)
-        
-        if character:FindFirstChild(CONFIG.TOOL_NAME) then
+        return true
+    end
+    
+    -- Try to find tool in backpack
+    local backpack = player:FindFirstChild("Backpack")
+    if backpack then
+        tool = backpack:FindFirstChild(CONFIG.TOOL_NAME)
+        if tool then
+            tool.Parent = character
+            task.wait(0.1)
+            humanoid:EquipTool(tool)
+            debugPrint("Equipped tool from backpack")
             return true
         end
     end
     
+    debugPrint("Tool not found")
     return false
 end
 
 local function attemptFire()
-    if not State.isRunning or State.specialMode or State.bossCompleted then return end
-    if not State.playerAlive then return end
+    if not State.isRunning or State.specialMode or State.bossCompleted then 
+        return 
+    end
+    if not State.playerAlive then 
+        return 
+    end
     
+    -- Get or update current target
     State.currentTarget = selectTarget()
     if not State.currentTarget then
         return
     end
     
+    -- Get tool
     local toolData = getValidTool()
     if not toolData then 
         local equipped = equipTool()
-        if not equipped then return end
+        if not equipped then 
+            return 
+        end
         
         toolData = getValidTool()
-        if not toolData then return end
+        if not toolData then 
+            return 
+        end
     end
     
+    -- Check fire rate
     local now = tick()
-    if now - State.lastFireTime < CONFIG.FIRE_RATE then return end
+    if now - State.lastFireTime < CONFIG.FIRE_RATE then 
+        return 
+    end
     
     State.lastFireTime = now
     
+    -- Determine target position
     local targetPos
     if State.currentTarget.Name == "The Arbiter" then
         targetPos = ARBITER_TARGET_POSITION
+        debugPrint("Firing at Arbiter (fixed position)")
     else
         local targetPart = State.currentTarget.TargetPart
         targetPos = targetPart.Position
+        debugPrint("Firing at " .. State.currentTarget.Name)
     end
     
+    -- Get camera for direction calculation
     local camera = workspace.CurrentCamera
-    if not camera then return end
+    if not camera then 
+        return 
+    end
     
+    -- Calculate firing positions
     local cameraPosition = camera.CFrame.Position
-    local cameraToTarget = (targetPos - cameraPosition).Unit
+    local direction = (targetPos - cameraPosition).Unit
     
-    local startPos = targetPos
+    local startPos = targetPos - (direction * 5)  -- Start 5 studs away from target
     local endPos = targetPos
     
-    local travelDistance = (endPos - startPos).Magnitude
-    if travelDistance < 0.1 then
-        startPos = targetPos - (cameraToTarget * 0.1)
-    end
-    
-    local success = pcall(function()
+    -- Try to fire
+    local success, result = pcall(function()
         return toolData.Remote:InvokeServer("fire", {startPos, endPos, State.chargeValue})
     end)
     
     if not success then
-        local attachment = toolData.Handle:FindFirstChild("Attachment")
-        if attachment then
-            local toolPosition = attachment.WorldPosition
-            local direction = (targetPos - toolPosition).Unit
-            local nearTargetPos = targetPos - (direction * 0.01)
-            
-            pcall(function()
-                return toolData.Remote:InvokeServer("fire", {nearTargetPos, targetPos, State.chargeValue})
-            end)
-        end
+        debugPrint("Fire failed: " .. tostring(result))
+        
+        -- Fallback: try different positions
+        pcall(function()
+            return toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
+        end)
     end
 end
 
 local function handleBossCompletion()
-    if State.bossCompleted then return end
+    if State.bossCompleted then 
+        return 
+    end
+    
+    debugPrint("Boss completed, preparing for dungeon...")
     State.bossCompleted = true
     State.specialMode = true
     State.isRunning = false
     
     task.wait(3)
     
+    -- Unequip cannon
     local tool = getValidTool()
     if tool and tool.Tool then
         tool.Tool.Parent = player.Backpack
@@ -462,6 +465,7 @@ local function handleBossCompletion()
     
     task.wait(1)
     
+    -- Equip artifact if available
     local character = player.Character
     if character then
         local artifact = character:FindFirstChild("Mysterious Artifact")
@@ -485,32 +489,26 @@ local function handleBossCompletion()
     
     task.wait(2)
     
+    -- Create party
     pcall(function()
-        local args = {
-            [1] = "createParty",
-            [2] = {
-                ["settings"] = {
-                    ["FriendsOnly"] = false,
-                    ["Visual"] = true
-                },
-                ["subplace"] = "Stronghold"
-            }
-        }
-        
         local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
-        partyRemote:InvokeServer(unpack(args))
+        partyRemote:InvokeServer("createParty", {
+            settings = {
+                FriendsOnly = false,
+                Visual = true
+            },
+            subplace = "Stronghold"
+        })
+        debugPrint("Party created")
     end)
     
     task.wait(3)
     
+    -- Join dungeon
     pcall(function()
-        local args = {
-            [1] = "joinSubplace",
-            [2] = {}
-        }
-        
         local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
-        partyRemote:InvokeServer(unpack(args))
+        partyRemote:InvokeServer("joinSubplace", {})
+        debugPrint("Joined dungeon")
     end)
 end
 
@@ -539,28 +537,19 @@ local function checkBossStatus()
 end
 
 local function farmingLoop()
-    local heartbeat = RunService.Heartbeat
-    local lastEnemyCheck = 0
-    local enemyCheckInterval = 0.3
+    debugPrint("Starting farming loop...")
+    
     local lastBossCheck = 0
-    local bossCheckInterval = 1
+    local bossCheckInterval = 2
     
     while State.isRunning and not State.bossCompleted do
         local now = tick()
         
+        -- Update player alive status
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
-            if checkAutoTeleport() then
-                handleBossCompletion()
-                break
-            end
-            
-            if checkLives() then
-                handleBossCompletion()
-                break
-            end
-            
+            -- Check boss status periodically
             if now - lastBossCheck > bossCheckInterval then
                 local bossStatus = checkBossStatus()
                 
@@ -572,71 +561,70 @@ local function farmingLoop()
                 lastBossCheck = now
             end
             
-            if now - lastEnemyCheck > enemyCheckInterval then
-                State.currentTarget = selectTarget()
-                lastEnemyCheck = now
-            end
-            
-            if State.currentTarget then
-                if not getValidTool() then
-                    equipTool()
-                end
-                
-                if now - State.lastFireTime >= CONFIG.FIRE_RATE then
-                    State.lastFireTime = now
-                    attemptFire()
-                end
-            end
+            -- Always try to fire if we have a target
+            attemptFire()
         else
             State.currentTarget = nil
         end
         
-        heartbeat:Wait()
+        RunService.Heartbeat:Wait()
     end
+    
+    debugPrint("Farming loop ended")
 end
 
 local function onCharacterAdded(character)
+    debugPrint("Character added")
     task.wait(2)
     
+    -- Teleport if needed
     if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
         task.wait(1)
         teleportToPosition()
     end
     
+    -- Send skip commands if needed
     if game.PlaceId == SPECIFIC_PLACE_ID and (not State.skipAllSaid or not State.skipSaid) then
         task.spawn(function()
             sendSkipCommands()
         end)
     end
     
+    -- Equip tool if farming is active
     if State.isRunning and not State.specialMode and not State.bossCompleted then
         if isPlayerAlive() then
             equipTool()
-            cache.lastPriorityCheck = 0
         end
     end
 end
 
 local function initialize()
+    debugPrint("Initializing AutoFarm...")
+    
     if not player.Character then
         player.CharacterAdded:Wait()
     end
     
+    -- Connect character events
     player.CharacterAdded:Connect(onCharacterAdded)
     
+    -- Initial setup
     onCharacterAdded(player.Character)
     
+    -- Start farming loop
     task.spawn(farmingLoop)
     
+    -- Cache cleanup
     task.spawn(function()
         while State.isRunning and not State.bossCompleted do
-            task.wait(60)
+            task.wait(30)
             cache.workspaceChildren = {}
         end
     end)
 end
 
-local function safeStart()
+-- Main execution
+task.spawn(function()
     while not game:IsLoaded() do
         task.wait(0.5)
     end
@@ -655,22 +643,24 @@ local function safeStart()
     
     local success, err = pcall(initialize)
     if not success then
+        debugPrint("Initialization error: " .. tostring(err))
         task.wait(5)
-        safeStart()
+        pcall(initialize)
     end
-end
+end)
 
-task.spawn(safeStart)
-
+-- Return API
 return {
     Stop = function()
         State.isRunning = false
+        debugPrint("AutoFarm stopped")
     end,
     
     Start = function()
         if not State.isRunning then
             State.isRunning = true
             task.spawn(farmingLoop)
+            debugPrint("AutoFarm started")
         end
     end,
     
@@ -685,27 +675,12 @@ return {
     end,
     
     GetStatus = function()
-        local livesValue = player:FindFirstChild("Lives")
-        local currentLives = "Not found"
-        if livesValue and livesValue:IsA("StringValue") then
-            currentLives = livesValue.Value
-        end
-        
         return {
             BossSpawned = State.bossHasSpawned,
             BossCompleted = State.bossCompleted,
             CurrentTarget = State.currentTarget and State.currentTarget.Name or "None",
-            LivesValue = currentLives,
-            LivesTriggered = State.livesChecked,
-            AutoTeleportTriggered = State.autoTeleportTriggered,
-            CurrentPlaceId = game.PlaceId,
-            PlayerAlive = State.playerAlive
+            PlayerAlive = State.playerAlive,
+            IsRunning = State.isRunning
         }
-    end,
-    
-    TriggerDungeon = function()
-        if not State.bossCompleted then
-            handleBossCompletion()
-        end
     end
 }
