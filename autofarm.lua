@@ -143,16 +143,8 @@ local function checkLives()
     State.lastLivesCheck = now
     
     local livesValue = player:FindFirstChild("Lives")
-    if livesValue and livesValue:IsA("StringValue") then
-        local livesText = livesValue.Value
-        
-        -- Try to extract number from text (might be "1" or "1/5" or similar)
-        local livesNumber
-        if livesText:match("%d+") then
-            livesNumber = tonumber(livesText:match("%d+"))
-        else
-            livesNumber = tonumber(livesText)
-        end
+    if livesValue and livesValue:IsA("NumberValue") then
+        local livesNumber = livesValue.Value
         
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
@@ -759,8 +751,8 @@ return {
     GetStatus = function()
         local livesValue = player:FindFirstChild("Lives")
         local currentLives = "Not found"
-        if livesValue and livesValue:IsA("StringValue") then
-            currentLives = livesValue.Value
+        if livesValue and livesValue:IsA("NumberValue") then
+            currentLives = tostring(livesValue.Value)
         end
         
         return {
