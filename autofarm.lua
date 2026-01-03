@@ -15,11 +15,11 @@ local CONFIG = {
     TOOL_NAME = "Equinox Cannon",
     REMOTE_NAME = "RemoteFunction",
     TARGET_UPDATE_INTERVAL = 0.5,
-    WORLDUPDATE_INTERVAL = 2,
-    HEALTHCHECK_INTERVAL = 1,
+    WORLD_UPDATE_INTERVAL = 2,
+    HEALTH_CHECK_INTERVAL = 1,
     MAX_TARGET_DISTANCE = 300,
     SHIELD_COOLDOWN = 5,
-    ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554)  -- Updated position
+    ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554)
 }
 
 -- Priority enemies
@@ -70,14 +70,6 @@ local State = {
 local ObjectPools = {
     enemyCache = {},
     workspaceCache = {}
-}
-
--- Performance tracking
-local Performance = {
-    frameCount = 0,
-    lastPerfCheck = tick(),
-    fps = 60,
-    memoryUsage = 0
 }
 
 -- Get TextChatService channel safely
@@ -196,7 +188,7 @@ end
 -- Optimized workspace children cache
 local function updateWorkspaceCache()
     local now = tick()
-    if now - State.lastWorldUpdate > CONFIG.WORLDUPDATE_INTERVAL then
+    if now - State.lastWorldUpdate > CONFIG.WORLD_UPDATE_INTERVAL then
         ObjectPools.workspaceCache = workspace:GetChildren()
         State.lastWorldUpdate = now
         return true
@@ -239,7 +231,7 @@ local function findEnemies()
                         LastSeen = tick()
                     }
                     
-                    if model.Name == "Gilgamesh, the Consumer of Reality" then
+                    if model.Name == "Gilgamesh, the Consumer of Reality" or "The Supreme Uber Bringer of Light and Space Time Annihilation" then
                         State.gilgameshHasSpawned = true
                     elseif model.Name == "The Arbiter" then
                         State.arbiterSpawned = true
@@ -535,28 +527,6 @@ local function setupDeathMonitoring()
     table.insert(State.connectionPool, connection)
 end
 
--- Optimized performance monitoring (silent)
-local function monitorPerformance()
-    Performance.frameCount = Performance.frameCount + 1
-    
-    local now = tick()
-    if now - Performance.lastPerfCheck >= 1 then
-        Performance.fps = Performance.frameCount
-        Performance.frameCount = 0
-        
-        local mem = collectgarbage("count")
-        Performance.memoryUsage = mem
-        
-        if mem > 50000 then
-            collectgarbage("collect")
-            cleanConnectionPool()
-            ObjectPools.enemyCache = {}
-        end
-        
-        Performance.lastPerfCheck = now
-    end
-end
-
 -- Optimized skip commands with delay
 local function sendSkipCommands()
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
@@ -730,7 +700,6 @@ local function farmingLoop()
             State.currentTarget = nil
         end
         
-        monitorPerformance()
         heartbeat:Wait()
     end
 end
@@ -774,12 +743,14 @@ local function initialize()
     
     task.spawn(farmingLoop)
     
-    -- Memory management
+    -- SIMPLIFIED memory management (no collectgarbage needed)
     task.spawn(function()
         while State.isRunning and not State.gilgameshCompleted do
             task.wait(60)
+            -- Just clear caches periodically
             ObjectPools.workspaceCache = {}
-            collectgarbage("collect")
+            ObjectPools.enemyCache = {}
+            cleanConnectionPool()
         end
     end)
 end
@@ -801,7 +772,7 @@ local function safeStart()
         player.CharacterAdded:Wait()
     end
     
-    task.wait(2) -- Extra safety delay
+    task.wait(2)
     
     local success, err = pcall(initialize)
     if not success then
@@ -831,19 +802,8 @@ return {
     
     EquipTool = equipTool,
     
-    GetPerformance = function()
-        return {
-            FPS = Performance.fps,
-            MemoryKB = Performance.memoryUsage,
-            TargetsCached = #ObjectPools.enemyCache,
-            ArbiterSpawned = State.arbiterSpawned,
-            CurrentTarget = State.currentTarget and State.currentTarget.Name or "None",
-            ToolEquipped = getValidTool() ~= nil
-        }
-    end,
-    
     ForceCleanup = function()
-        collectgarbage("collect")
+        -- Simple cleanup without collectgarbage
         cleanConnectionPool()
         ObjectPools.enemyCache = {}
         ObjectPools.workspaceCache = {}
