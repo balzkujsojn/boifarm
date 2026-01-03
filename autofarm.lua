@@ -8,6 +8,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TextChatService = game:GetService("TextChatService")
 local TweenService = game:GetService("TweenService")
 local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
 
 local CONFIG = {
     FIRE_RATE = 0.05,
@@ -55,7 +56,7 @@ local State = {
     maxTeleportAttempts = 3,
     teleportInProgress = false,
     rejoinAttempts = 0,
-    maxRejoinAttempts = 5
+    maxRejoinAttempts = 3
 }
 
 local cache = {
@@ -623,35 +624,73 @@ local function checkBossStatus()
     end
 end
 
-local function attemptRejoinGame()
+local function rejoinGame()
     State.rejoinAttempts = State.rejoinAttempts + 1
     
     if State.rejoinAttempts > State.maxRejoinAttempts then
         return false
     end
     
-    task.wait(2)
+    task.wait(1)
     
     local success = pcall(function()
-        TeleportService:Teleport(REJOIN_GAME_ID, player)
+        -- Try to join a public server of the target game
+        TeleportService:TeleportToPlaceInstance(REJOIN_GAME_ID, "", player)
         return true
     end)
     
     if not success then
-        task.wait(5)
-        return attemptRejoinGame()
+        task.wait(3)
+        return rejoinGame()
     end
     
     return true
 end
 
+local function closeAndRejoin()
+    State.isRunning = false
+    
+    task.wait(1)
+    
+    local success = rejoinGame()
+    
+    if not success then
+        task.wait(2)
+        
+        pcall(function()
+            -- Fallback: Use GuiService to return to home
+            GuiService:ClearError()
+            GuiService:ReturnToHome()
+        end)
+        
+        task.wait(3)
+        
+        pcall(function()
+            -- Try one more time to join after returning home
+            game:GetService("TeleportService"):Teleport(REJOIN_GAME_ID, player)
+        end)
+    end
+end
+
 local function setupKickDetection()
     Players.PlayerRemoving:Connect(function(removedPlayer)
         if removedPlayer == player then
-            State.isRunning = false
-            task.wait(1)
-            attemptRejoinGame()
+            task.spawn(function()
+                closeAndRejoin()
+            end)
         end
+    end)
+end
+
+local function setupAutoRejoin()
+    -- Also check for disconnection errors
+    local connection
+    connection = game:GetService("NetworkClient").ConnectionLost:Connect(function()
+        connection:Disconnect()
+        task.spawn(function()
+            task.wait(2)
+            closeAndRejoin()
+        end)
     end)
 end
 
@@ -726,6 +765,7 @@ local function initialize()
     player.CharacterAdded:Connect(onCharacterAdded)
     
     setupKickDetection()
+    setupAutoRejoin()
     
     onCharacterAdded(player.Character)
     
@@ -815,6 +855,6 @@ return {
     end,
     
     RejoinGame = function()
-        attemptRejoinGame()
+        closeAndRejoin()
     end
 }
