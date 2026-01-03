@@ -1,19 +1,24 @@
-repeat task.wait() until game:IsLoaded()
 local Players = game:GetService("Players")
-repeat task.wait() until Players.LocalPlayer
-local player = Players.LocalPlayer
-
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TextChatService = game:GetService("TextChatService")
 local TweenService = game:GetService("TweenService")
 
+-- Wait for player to load
+local player = Players.LocalPlayer
+if not player then
+    repeat task.wait() until Players.LocalPlayer
+    player = Players.LocalPlayer
+end
+
+-- Configuration
 local CONFIG = {
-    FIRE_RATE = 0.05,  -- 20 shots per second
+    FIRE_RATE = 0.05,
     TOOL_NAME = "Equinox Cannon",
     REMOTE_NAME = "RemoteFunction"
 }
 
+-- Priority enemies
 local PRIORITY_ENEMIES = {
     ["The Arbiter"] = true,
     ["Gilgamesh, the Consumer of Reality"] = true,
@@ -21,16 +26,17 @@ local PRIORITY_ENEMIES = {
     ["Controller Turret"] = true
 }
 
+-- Special target parts for specific enemies
 local SPECIAL_TARGET_PARTS = {
     ["The Arbiter"] = "HumanoidRootPart"
 }
 
+-- Teleport position for specific place ID
 local TELEPORT_POSITION = Vector3.new(-21, 103, -469)
 local SPECIFIC_PLACE_ID = 96516249626799
-local AUTOTELEPORT_PLACE_ID = 8811271345
-
 local ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554)
 
+-- State management
 local State = {
     isRunning = true,
     specialMode = false,
@@ -42,27 +48,28 @@ local State = {
     playerAlive = true,
     skipSaid = false,
     skipAllSaid = false,
+    characterDeathConnection = nil,
+    healthMonitorConnection = nil,
     shieldUsed = false,
     lastShieldUse = 0,
     shieldCooldown = 5,
-    teleported = false,
-    livesChecked = false,
-    lastLivesCheck = 0,
-    autoTeleportTriggered = false
+    teleported = false
 }
 
+-- Cache for performance
 local cache = {
     workspaceChildren = {},
     lastWorkspaceUpdate = 0,
-    workspaceUpdateInterval = 0.5,  -- Reduced for faster updates
+    workspaceUpdateInterval = 0.5,  -- Reduced for faster updates like new script
     lastPriorityCheck = 0
 }
 
--- Debug function
+-- Debug function from new script
 local function debugPrint(message)
     warn("[AutoFarm] " .. message)
 end
 
+-- IMPROVED CHAT FUNCTION FROM NEW SCRIPT
 local function chatMessage(str)
     if type(str) ~= "string" then str = tostring(str) end
     
@@ -89,6 +96,7 @@ local function chatMessage(str)
     end
 end
 
+-- IMPROVED SKIP COMMANDS FUNCTION FROM NEW SCRIPT
 local function sendSkipCommands()
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
     if State.skipAllSaid and State.skipSaid then return end
@@ -111,6 +119,7 @@ local function sendSkipCommands()
     end)
 end
 
+-- IMPROVED TELEPORT FUNCTION FROM NEW SCRIPT
 local function teleportToPosition()
     if State.teleported then return end
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
@@ -129,6 +138,42 @@ local function teleportToPosition()
     tween:Play()
 end
 
+-- Function to use shield when health drops below 50%
+local function useShield()
+    local now = tick()
+    
+    if now - State.lastShieldUse < State.shieldCooldown then
+        return
+    end
+    
+    local character = player.Character
+    if not character then return end
+    
+    local shield = character:FindFirstChild("Shield")
+    if not shield then 
+        debugPrint("Shield not found on character")
+        return 
+    end
+    
+    local shieldRemote = shield:FindFirstChild("ShieldRemote")
+    if not shieldRemote then 
+        debugPrint("ShieldRemote not found on Shield")
+        return 
+    end
+    
+    local success = pcall(function()
+        shieldRemote:FireServer()
+        State.shieldUsed = true
+        State.lastShieldUse = now
+        debugPrint("✓ Shield activated! Player health below 50%")
+    end)
+    
+    if not success then
+        debugPrint("✗ Failed to activate shield")
+    end
+end
+
+-- IMPROVED PLAYER ALIVE CHECK FROM NEW SCRIPT
 local function isPlayerAlive()
     if not player.Character then return false end
     
@@ -138,6 +183,71 @@ local function isPlayerAlive()
     return humanoid.Health > 0
 end
 
+-- Function to monitor player health for shield activation
+local function setupHealthMonitoring()
+    if State.healthMonitorConnection then
+        State.healthMonitorConnection:Disconnect()
+        State.healthMonitorConnection = nil
+    end
+    
+    local character = player.Character
+    if not character then return end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    local maxHealth = humanoid.MaxHealth
+    
+    State.healthMonitorConnection = humanoid.HealthChanged:Connect(function(currentHealth)
+        if currentHealth > 0 and maxHealth > 0 then
+            local healthPercent = (currentHealth / maxHealth) * 100
+            
+            if healthPercent < 50 and not State.shieldUsed then
+                debugPrint("Player health below 50%:", math.floor(healthPercent))
+                useShield()
+            elseif healthPercent >= 50 then
+                State.shieldUsed = false
+            end
+        end
+    end)
+end
+
+-- Function to monitor player death
+local function setupDeathMonitoring()
+    if State.characterDeathConnection then
+        State.characterDeathConnection:Disconnect()
+        State.characterDeathConnection = nil
+    end
+    
+    local character = player.Character
+    if not character then return end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    State.characterDeathConnection = humanoid.HealthChanged:Connect(function(health)
+        local wasAlive = State.playerAlive
+        State.playerAlive = health > 0
+        
+        if health <= 0 and wasAlive then
+            debugPrint("Player died! Waiting for respawn...")
+            State.currentTarget = nil
+            State.shieldUsed = false
+        elseif health > 0 and not wasAlive then
+            debugPrint("Player respawned! Re-equipping cannon...")
+            task.wait(1.5)
+            if State.isRunning and not State.specialMode and not State.bossCompleted then
+                equipTool()
+                cache.lastPriorityCheck = 0
+                State.shieldUsed = false
+            end
+        end
+    end)
+    
+    State.playerAlive = humanoid.Health > 0
+end
+
+-- IMPROVED TARGET PART FUNCTION FROM NEW SCRIPT
 local function getTargetPart(model)
     local enemyName = model.Name
     
@@ -148,7 +258,7 @@ local function getTargetPart(model)
         end
     end
     
-    -- Try multiple possible part names
+    -- Try multiple possible part names from new script
     local possibleParts = {
         "HumanoidRootPart",
         "Head",
@@ -176,6 +286,7 @@ local function getTargetPart(model)
     return nil
 end
 
+-- IMPROVED ENEMY FINDING FROM NEW SCRIPT
 local function findEnemies()
     if not State.playerAlive then 
         return {}
@@ -198,7 +309,7 @@ local function findEnemies()
             
             -- Check if it's an enemy by checking health and if it has EnemyMain or other indicators
             if humanoid and humanoid.Health > 0 then
-                -- Check if it's an enemy (not a player)
+                -- Check if it's an enemy (not a player) - improved from new script
                 local isPlayerCharacter = false
                 for _, plr in ipairs(Players:GetPlayers()) do
                     if plr.Character == model then
@@ -220,7 +331,7 @@ local function findEnemies()
                             LastSeen = now
                         }
                         
-                        -- Check for boss spawns
+                        -- Check for boss spawns from new script
                         if model.Name == "Gilgamesh, the Consumer of Reality" or 
                            model.Name == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
                             State.bossHasSpawned = true
@@ -250,6 +361,32 @@ local function findEnemies()
     return {}
 end
 
+-- Function to check boss status from new script
+local function checkBossStatus()
+    local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
+    local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
+    
+    local boss = gilgamesh or uberBringer
+    
+    if boss then
+        State.bossHasSpawned = true
+        
+        local humanoid = boss:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            if humanoid.Health <= 0 then
+                return "dead"
+            else
+                return "alive"
+            end
+        else
+            return "spawning"
+        end
+    else
+        return "not_spawned"
+    end
+end
+
+-- IMPROVED TARGET SELECTION FROM NEW SCRIPT
 local function selectTarget()
     if not State.playerAlive then 
         return nil
@@ -303,6 +440,7 @@ local function selectTarget()
     return closestEnemy
 end
 
+-- Optimized function to get valid tool
 local function getValidTool()
     if not State.playerAlive then 
         return nil 
@@ -328,6 +466,7 @@ local function getValidTool()
     return nil
 end
 
+-- IMPROVED EQUIP TOOL FUNCTION FROM NEW SCRIPT
 local function equipTool()
     if not State.playerAlive then 
         task.wait(0.5)
@@ -370,6 +509,7 @@ local function equipTool()
     return false
 end
 
+-- IMPROVED FIRING FUNCTION FROM NEW SCRIPT
 local function attemptFire()
     if not State.isRunning or State.specialMode or State.bossCompleted then 
         return 
@@ -406,7 +546,7 @@ local function attemptFire()
     
     State.lastFireTime = now
     
-    -- Determine target position
+    -- Determine target position from new script
     local targetPos
     if State.currentTarget.Name == "The Arbiter" then
         targetPos = ARBITER_TARGET_POSITION
@@ -445,6 +585,7 @@ local function attemptFire()
     end
 end
 
+-- IMPROVED BOSS COMPLETION FROM NEW SCRIPT
 local function handleBossCompletion()
     if State.bossCompleted then 
         return 
@@ -512,30 +653,7 @@ local function handleBossCompletion()
     end)
 end
 
-local function checkBossStatus()
-    local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
-    local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
-    
-    local boss = gilgamesh or uberBringer
-    
-    if boss then
-        State.bossHasSpawned = true
-        
-        local humanoid = boss:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            if humanoid.Health <= 0 then
-                return "dead"
-            else
-                return "alive"
-            end
-        else
-            return "spawning"
-        end
-    else
-        return "not_spawned"
-    end
-end
-
+-- IMPROVED FARMING LOOP FROM NEW SCRIPT
 local function farmingLoop()
     debugPrint("Starting farming loop...")
     
@@ -573,9 +691,13 @@ local function farmingLoop()
     debugPrint("Farming loop ended")
 end
 
+-- IMPROVED CHARACTER ADDED FUNCTION FROM NEW SCRIPT
 local function onCharacterAdded(character)
     debugPrint("Character added")
     task.wait(2)
+    
+    setupDeathMonitoring()
+    setupHealthMonitoring()
     
     -- Teleport if needed
     if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
@@ -598,6 +720,7 @@ local function onCharacterAdded(character)
     end
 end
 
+-- IMPROVED INITIALIZE FUNCTION FROM NEW SCRIPT
 local function initialize()
     debugPrint("Initializing AutoFarm...")
     
@@ -614,7 +737,7 @@ local function initialize()
     -- Start farming loop
     task.spawn(farmingLoop)
     
-    -- Cache cleanup
+    -- Cache cleanup from new script
     task.spawn(function()
         while State.isRunning and not State.bossCompleted do
             task.wait(30)
@@ -623,7 +746,7 @@ local function initialize()
     end)
 end
 
--- Main execution
+-- Main execution from new script
 task.spawn(function()
     while not game:IsLoaded() do
         task.wait(0.5)
