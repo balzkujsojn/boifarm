@@ -12,10 +12,10 @@ local Debris = game:GetService("Debris")
 
 -- Configuration
 local CONFIG = {
-    FIRE_RATE = 0.08,
+    FIRE_RATE = 0.05,  -- Matches original script
     TOOL_NAME = "Equinox Cannon",
     REMOTE_NAME = "RemoteFunction",
-    TARGET_UPDATE_INTERVAL = 0.5,  -- FIXED: Correct variable name
+    TARGET_UPDATE_INTERVAL = 0.5,
     WORLDUPDATE_INTERVAL = 2,
     HEALTHCHECK_INTERVAL = 1,
     MAX_TARGET_DISTANCE = 300,
@@ -35,10 +35,9 @@ local SPECIAL_TARGET_POSITIONS = {
     ["The Arbiter"] = CONFIG.ARBITER_TARGET_POSITION
 }
 
--- Special target parts with fallbacks
+-- Special target parts for specific enemies
 local SPECIAL_TARGET_PARTS = {
-    ["Gilgamesh, the Consumer of Reality"] = {"HumanoidRootPart", "Torso", "UpperTorso", "Head"},
-    ["Controller Turret"] = {"HumanoidRootPart", "Torso", "UpperTorso"}
+    ["The Arbiter"] = "HumanoidRootPart"  -- Arbiter uses HumanoidRootPart for validation
 }
 
 -- Teleport position
@@ -153,39 +152,42 @@ local function getTargetPositionForEnemy(enemyName, enemyModel)
     end
     
     -- For other enemies, get their actual part position
-    local specialParts = SPECIAL_TARGET_PARTS[enemyName]
-    if specialParts then
-        for _, partName in ipairs(specialParts) do
-            local part = enemyModel:FindFirstChild(partName)
-            if part then
-                return part.Position
-            end
+    local specialPartName = SPECIAL_TARGET_PARTS[enemyName]
+    if specialPartName then
+        local specialPart = enemyModel:FindFirstChild(specialPartName)
+        if specialPart then
+            return specialPart.Position
         end
     end
     
-    -- Default fallback
-    local rootPart = enemyModel:FindFirstChild("HumanoidRootPart")
-    if rootPart then
-        return rootPart.Position
-    end
-    
-    local torso = enemyModel:FindFirstChild("Torso") or enemyModel:FindFirstChild("UpperTorso")
-    if torso then
-        return torso.Position
-    end
-    
-    return enemyModel:GetPivot().Position
+    -- Default fallback (matches original script)
+    return enemyModel:FindFirstChild("HumanoidRootPart") or 
+           enemyModel:FindFirstChild("Torso") or 
+           enemyModel:FindFirstChild("UpperTorso") or
+           enemyModel:FindFirstChild("Head") or
+           enemyModel:FindFirstChild("Chest")
 end
 
--- Get target part for visual/validation
+-- Get target part for validation (matches original script)
 local function getTargetPartForValidation(model)
-    local rootPart = model:FindFirstChild("HumanoidRootPart")
-    if rootPart then return rootPart end
+    local enemyName = model.Name
     
-    local torso = model:FindFirstChild("Torso") or model:FindFirstChild("UpperTorso")
-    if torso then return torso end
+    -- Check if this enemy has a special target part
+    if SPECIAL_TARGET_PARTS[enemyName] then
+        local specialPart = model:FindFirstChild(SPECIAL_TARGET_PARTS[enemyName])
+        if specialPart then
+            return specialPart
+        else
+            warn("Special target part not found for", enemyName, ":", SPECIAL_TARGET_PARTS[enemyName])
+        end
+    end
     
-    return model:FindFirstChild("Head")
+    -- Default part search order for regular enemies
+    return model:FindFirstChild("HumanoidRootPart") or 
+           model:FindFirstChild("Torso") or 
+           model:FindFirstChild("UpperTorso") or
+           model:FindFirstChild("Head") or
+           model:FindFirstChild("Chest")
 end
 
 -- Optimized object cleanup
@@ -209,7 +211,7 @@ local function updateWorkspaceCache()
     return false
 end
 
--- Optimized enemy detection
+-- Optimized enemy detection (matches original logic)
 local function findEnemies()
     if not State.playerAlive then return ObjectPools.enemyCache end
     
@@ -220,111 +222,116 @@ local function findEnemies()
         ObjectPools.enemyCache[i] = nil
     end
     
-    local char = player.Character
-    local playerPos = char and char:FindFirstChild("HumanoidRootPart") and 
-                      char.HumanoidRootPart.Position or Vector3.zero
-    
-    local priorityFound = false
+    local priorityEnemies = {}
+    local regularEnemies = {}
     
     for _, model in ipairs(ObjectPools.workspaceCache) do
         if not State.isRunning then break end
         
         if model:IsA("Model") and model.Parent == workspace then
-            local humanoid = model:FindFirstChildOfClass("Humanoid")
             local enemyMain = model:FindFirstChild("EnemyMain")
+            local humanoid = model:FindFirstChildOfClass("Humanoid")
             
-            if humanoid and humanoid.Health > 0 and enemyMain then
+            if enemyMain and humanoid and humanoid.Health > 0 then
+                -- Get the correct target part for this enemy
                 local targetPart = getTargetPartForValidation(model)
                 if targetPart then
-                    local distance = (targetPart.Position - playerPos).Magnitude
-                    if distance < CONFIG.MAX_TARGET_DISTANCE then
-                        local isPriority = PRIORITY_ENEMIES[model.Name] == true
-                        
-                        -- Track special enemies
-                        if model.Name == "Gilgamesh, the Consumer of Reality" then
-                            State.gilgameshHasSpawned = true
-                        elseif model.Name == "The Arbiter" then
-                            State.arbiterSpawned = true
-                        end
-                        
-                        -- Get the actual shooting position for this enemy
-                        local shootPosition = getTargetPositionForEnemy(model.Name, model)
-                        
-                        local enemyData = {
-                            Model = model,
-                            Humanoid = humanoid,
-                            TargetPart = targetPart,
-                            ShootPosition = shootPosition,
-                            Name = model.Name,
-                            IsPriority = isPriority,
-                            Distance = distance,
-                            HasFixedPosition = SPECIAL_TARGET_POSITIONS[model.Name] ~= nil
-                        }
-                        
-                        if isPriority then
-                            table.insert(ObjectPools.enemyCache, 1, enemyData)
-                            priorityFound = true
-                            if #ObjectPools.enemyCache > 10 then break end
-                        elseif not priorityFound then
-                            table.insert(ObjectPools.enemyCache, enemyData)
-                            if #ObjectPools.enemyCache > 15 then break end
-                        end
+                    local enemyData = {
+                        Model = model,
+                        Humanoid = humanoid,
+                        TargetPart = targetPart,
+                        Position = targetPart.Position,
+                        Name = model.Name,
+                        IsPriority = PRIORITY_ENEMIES[model.Name] == true,
+                        LastSeen = tick()
+                    }
+                    
+                    if model.Name == "Gilgamesh, the Consumer of Reality" then
+                        State.gilgameshHasSpawned = true
+                    elseif model.Name == "The Arbiter" then
+                        State.arbiterSpawned = true
+                    end
+                    
+                    if enemyData.IsPriority then
+                        table.insert(priorityEnemies, enemyData)
+                    else
+                        table.insert(regularEnemies, enemyData)
                     end
                 end
             end
         end
     end
     
-    -- Sort by priority first, then distance
-    if #ObjectPools.enemyCache > 0 and not priorityFound then
-        table.sort(ObjectPools.enemyCache, function(a, b)
-            return a.Distance < b.Distance
-        end)
+    if #priorityEnemies > 0 then
+        ObjectPools.enemyCache = priorityEnemies
+    else
+        ObjectPools.enemyCache = regularEnemies
     end
     
     return ObjectPools.enemyCache
 end
 
--- Optimized target selection
+-- Function to select best target with priority (matches original)
 local function selectTarget()
     if not State.playerAlive then return nil end
     
-    local now = tick()
-    -- FIXED: Changed CONFIG.TARGETUPDATE_INTERVAL to CONFIG.TARGET_UPDATE_INTERVAL
-    if now - State.lastTargetUpdate < CONFIG.TARGET_UPDATE_INTERVAL and State.currentTarget then
-        -- Validate current target still exists
-        local target = State.currentTarget
-        if target.Model and target.Model.Parent then
-            local humanoid = target.Model:FindFirstChildOfClass("Humanoid")
+    local enemies = findEnemies()
+    
+    if #enemies == 0 then
+        return nil
+    end
+    
+    if State.currentTarget then
+        local targetModel = State.currentTarget.Model
+        if targetModel and targetModel.Parent then
+            local humanoid = targetModel:FindFirstChildOfClass("Humanoid")
             if humanoid and humanoid.Health > 0 then
-                return target
+                if State.currentTarget.IsPriority then
+                    return State.currentTarget
+                end
+                
+                local hasPriority = false
+                for _, enemy in ipairs(enemies) do
+                    if enemy.IsPriority then
+                        hasPriority = true
+                        break
+                    end
+                end
+                
+                if not hasPriority then
+                    return State.currentTarget
+                end
             end
         end
     end
     
-    State.lastTargetUpdate = now
-    local enemies = findEnemies()
+    local character = player.Character
+    if not character then return enemies[1] end
     
-    if #enemies == 0 then
-        State.currentTarget = nil
-        return nil
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return enemies[1] end
+    
+    local playerPos = humanoidRootPart.Position
+    local closestEnemy = enemies[1]
+    local closestDistance = math.huge
+    
+    for i = 1, math.min(#enemies, 15) do
+        local enemy = enemies[i]
+        local distance = (enemy.Position - playerPos).Magnitude
+        if distance < closestDistance then
+            closestDistance = distance
+            closestEnemy = enemy
+        end
     end
     
-    -- Return first enemy (already sorted by priority/distance)
-    State.currentTarget = enemies[1]
-    
-    -- Log special targeting for The Arbiter
-    if State.currentTarget.Name == "The Arbiter" and State.currentTarget.HasFixedPosition then
-        warn("🎯 Targeting The Arbiter at fixed position:", CONFIG.ARBITER_TARGET_POSITION)
-    end
-    
-    return State.currentTarget
+    return closestEnemy
 end
 
--- FIXED: Add missing equipTool function
+-- FIXED: Add missing equipTool function (matches original)
 local function equipTool()
     if not State.playerAlive then 
-        return false
+        task.wait(0.5)
+        return equipTool()
     end
     
     local character = player.Character
@@ -335,152 +342,118 @@ local function equipTool()
     
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid then 
-        return false
+        task.wait(0.5)
+        return equipTool()
     end
     
-    -- Check if tool is already in character
     local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
     if not tool then
-        -- Check backpack
         local backpack = player:FindFirstChild("Backpack")
         if backpack then
             tool = backpack:FindFirstChild(CONFIG.TOOL_NAME)
             if tool then
                 tool.Parent = character
-                task.wait(0.2)
             else
-                warn("✗ Equinox Cannon not found in backpack!")
+                warn("Equinox Cannon not found in inventory!")
                 return false
             end
         else
-            warn("✗ Backpack not found!")
-            return false
+            task.wait(0.5)
+            return equipTool()
         end
     end
     
-    -- Equip the tool
     if tool then
         humanoid:EquipTool(tool)
-        task.wait(0.3)
+        task.wait(0.2)
         
         if character:FindFirstChild(CONFIG.TOOL_NAME) then
             warn("✓ Equinox Cannon equipped")
-            cachedToolData = nil  -- Clear cache so it gets fresh tool data
             return true
         end
     end
     
+    warn("✗ Failed to equip Equinox Cannon")
     return false
 end
 
--- Optimized tool handling with caching
-local lastToolCheck = 0
-local cachedToolData = nil
+-- Optimized function to get valid tool (matches original)
 local function getValidTool()
-    if not State.playerAlive then
-        cachedToolData = nil
-        return nil
+    if not State.playerAlive then return nil end
+    
+    local character = player.Character
+    if not character then return nil end
+    
+    local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
+    if not tool then return nil end
+    
+    local remote = tool:FindFirstChild(CONFIG.REMOTE_NAME)
+    local handle = tool:FindFirstChild("Handle")
+    
+    if remote and handle and remote:IsA("RemoteFunction") then
+        return {Tool = tool, Remote = remote, Handle = handle}
     end
     
-    local now = tick()
-    if cachedToolData and now - lastToolCheck < 1 then
-        return cachedToolData
-    end
-    
-    lastToolCheck = now
-    local char = player.Character
-    if not char then
-        cachedToolData = nil
-        return nil
-    end
-    
-    local tool = char:FindFirstChild(CONFIG.TOOL_NAME)
-    if not tool then
-        -- Try to equip if not found
-        local equipped = equipTool()
-        if not equipped then
-            cachedToolData = nil
-            return nil
-        end
-        tool = char:FindFirstChild(CONFIG.TOOL_NAME)
-        if not tool then
-            cachedToolData = nil
-            return nil
-        end
-    end
-    
-    if tool then
-        local remote = tool:FindFirstChild(CONFIG.REMOTE_NAME)
-        local handle = tool:FindFirstChild("Handle")
-        
-        if remote and remote:IsA("RemoteFunction") and handle then
-            cachedToolData = {Tool = tool, Remote = remote, Handle = handle}
-            return cachedToolData
-        end
-    end
-    
-    cachedToolData = nil
     return nil
 end
 
--- Optimized firing with special position handling
+-- FIXED: Optimized firing logic with special target part handling (matches original but with Arbiter fix)
 local function attemptFire()
     if not State.isRunning or State.specialMode or State.gilgameshCompleted then return end
     if not State.playerAlive then return end
     
-    local target = selectTarget()
-    if not target then return end
+    State.currentTarget = selectTarget()
+    if not State.currentTarget then
+        return
+    end
     
     local toolData = getValidTool()
-    if not toolData then
-        -- Try to equip again
-        if equipTool() then
-            toolData = getValidTool()
-            if not toolData then return end
-        else
-            return
-        end
+    if not toolData then 
+        local equipped = equipTool()
+        if not equipped then return end
+        
+        toolData = getValidTool()
+        if not toolData then return end
     end
     
-    local now = tick()
-    if now - State.lastFireTime < CONFIG.FIRE_RATE then return end
-    
-    State.lastFireTime = now
-    
-    -- Use the correct shooting position for this enemy
-    local targetPos = target.ShootPosition
-    
-    -- For moving enemies with fixed positions, add slight offset for accuracy
-    if target.HasFixedPosition and target.Humanoid.MoveDirection.Magnitude > 0 then
-        local velocity = target.Humanoid.MoveDirection * target.Humanoid.WalkSpeed
-        targetPos = targetPos + (velocity * 0.15)
+    -- Get target position (fixed for Arbiter, actual for others)
+    local targetPos
+    if State.currentTarget.Name == "The Arbiter" then
+        targetPos = CONFIG.ARBITER_TARGET_POSITION
+        warn("🎯 Targeting The Arbiter at fixed position:", targetPos)
+    else
+        targetPos = State.currentTarget.TargetPart.Position
     end
     
-    -- Log targeting info for The Arbiter
-    if target.Name == "The Arbiter" then
-        local arbiterActualPos = target.TargetPart.Position
-        local distanceToFixedPos = (arbiterActualPos - CONFIG.ARBITER_TARGET_POSITION).Magnitude
-        warn(string.format("🎯 Shooting The Arbiter: Actual(%.1f, %.1f, %.1f) → Target(%.1f, %.1f, %.1f) | Distance: %.1f studs",
-            arbiterActualPos.X, arbiterActualPos.Y, arbiterActualPos.Z,
-            targetPos.X, targetPos.Y, targetPos.Z,
-            distanceToFixedPos))
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    
+    local cameraPosition = camera.CFrame.Position
+    local cameraToTarget = (targetPos - cameraPosition).Unit
+    
+    -- Shoot directly at target part (matches original script)
+    local startPos = targetPos
+    local endPos = targetPos
+    
+    local travelDistance = (endPos - startPos).Magnitude
+    if travelDistance < 0.1 then
+        startPos = targetPos - (cameraToTarget * 0.1)
     end
     
-    -- Fire at target position
     local success = pcall(function()
-        return toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
+        return toolData.Remote:InvokeServer("fire", {startPos, endPos, State.chargeValue})
     end)
     
     if not success then
-        -- Fallback: fire from camera
-        local camera = workspace.CurrentCamera
-        if camera then
-            local startPos = camera.CFrame.Position
-            local direction = (targetPos - startPos).Unit
-            local nearTarget = targetPos - (direction * 0.5)
+        warn("Fire request failed, trying fallback...")
+        local attachment = toolData.Handle:FindFirstChild("Attachment")
+        if attachment then
+            local toolPosition = attachment.WorldPosition
+            local direction = (targetPos - toolPosition).Unit
+            local nearTargetPos = targetPos - (direction * 0.01)
             
             pcall(function()
-                return toolData.Remote:InvokeServer("fire", {nearTarget, targetPos, State.chargeValue})
+                return toolData.Remote:InvokeServer("fire", {nearTargetPos, targetPos, State.chargeValue})
             end)
         end
     end
@@ -504,7 +477,18 @@ local function useShield()
         pcall(remote.FireServer, remote)
         State.lastShieldUse = now
         State.shieldUsed = true
+        warn("✓ Shield activated! Player health below 50%")
     end)
+end
+
+-- Function to check if player is alive (matches original)
+local function isPlayerAlive()
+    if not player.Character then return false end
+    
+    local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return false end
+    
+    return humanoid.Health > 0
 end
 
 -- Optimized health monitoring
@@ -517,28 +501,14 @@ local function setupHealthMonitoring()
     local humanoid = char:FindFirstChildOfClass("Humanoid")
     if not humanoid then return end
     
-    local connection = humanoid.HealthChanged:Connect(function(health)
-        if not State.isRunning then return end
-        
-        State.playerAlive = health > 0
-        
-        if not State.playerAlive then
-            State.currentTarget = nil
-            cachedToolData = nil
-            State.shieldUsed = false
-            return
-        end
-        
-        local now = tick()
-        if now - State.lastHealthCheck < CONFIG.HEALTHCHECK_INTERVAL then return end
-        
-        State.lastHealthCheck = now
-        local maxHealth = humanoid.MaxHealth
-        
-        if maxHealth > 0 and health > 0 then
-            local healthPercent = (health / maxHealth) * 100
+    local maxHealth = humanoid.MaxHealth
+    
+    local connection = humanoid.HealthChanged:Connect(function(currentHealth)
+        if currentHealth > 0 and maxHealth > 0 then
+            local healthPercent = (currentHealth / maxHealth) * 100
             
             if healthPercent < 50 and not State.shieldUsed then
+                warn("Player health below 50%:", healthPercent)
                 useShield()
             elseif healthPercent >= 50 then
                 State.shieldUsed = false
@@ -546,6 +516,38 @@ local function setupHealthMonitoring()
         end
     end)
     
+    table.insert(State.connectionPool, connection)
+end
+
+-- Function to monitor player death (matches original)
+local function setupDeathMonitoring()
+    cleanConnectionPool()
+    
+    local char = player.Character
+    if not char then return end
+    
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    local connection = humanoid.HealthChanged:Connect(function(health)
+        local wasAlive = State.playerAlive
+        State.playerAlive = health > 0
+        
+        if health <= 0 and wasAlive then
+            warn("Player died! Waiting for respawn...")
+            State.currentTarget = nil
+            State.shieldUsed = false
+        elseif health > 0 and not wasAlive then
+            warn("Player respawned! Re-equipping cannon...")
+            task.wait(1.5)
+            if State.isRunning and not State.specialMode and not State.gilgameshCompleted then
+                equipTool()
+                State.shieldUsed = false
+            end
+        end
+    end)
+    
+    State.playerAlive = humanoid.Health > 0
     table.insert(State.connectionPool, connection)
 end
 
@@ -565,7 +567,6 @@ local function monitorPerformance()
             warn("High memory detected (" .. math.floor(mem) .. " KB), cleaning up...")
             collectgarbage("collect")
             cleanConnectionPool()
-            cachedToolData = nil
             ObjectPools.enemyCache = {}
         end
         
@@ -578,20 +579,24 @@ local function sendSkipCommands()
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
     if State.skipAllSaid and State.skipSaid then return end
     
-    task.spawn(function()
-        if not State.skipAllSaid then
-            task.wait(0.5)
-            chatMessage("/skipall")
-            State.skipAllSaid = true
-        end
-        
-        task.wait(1)
-        
-        if not State.skipSaid then
-            chatMessage("/skip")
-            State.skipSaid = true
-        end
-    end)
+    -- First send /skipall
+    if not State.skipAllSaid then
+        warn("Sending /skipall...")
+        chatMessage("/skipall")
+        State.skipAllSaid = true
+        warn("✓ Sent /skipall")
+    end
+    
+    -- Wait 1 second
+    task.wait(1)
+    
+    -- Then send /skip
+    if not State.skipSaid then
+        warn("Sending /skip...")
+        chatMessage("/skip")
+        State.skipSaid = true
+        warn("✓ Sent /skip")
+    end
 end
 
 -- Optimized teleport with safety check
@@ -607,53 +612,192 @@ local function teleportToPosition()
     
     State.teleported = true
     
-    local tweenInfo = TweenInfo.new(1.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    warn("Teleporting to position:", TELEPORT_POSITION)
+    
+    local tweenInfo = TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     local tween = TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(TELEPORT_POSITION)})
     tween:Play()
+    
+    warn("✓ Teleported to target position")
 end
 
--- FIXED: Optimized main loop with simplified Gilgamesh check
-local function farmingLoop()
-    local heartbeat = RunService.Heartbeat
+-- Function to handle dungeon entry (from original)
+local function handleGilgameshCompletion()
+    if State.gilgameshCompleted then return end
+    State.gilgameshCompleted = true
+    State.specialMode = true
+    State.isRunning = false
     
-    while State.isRunning and not State.gilgameshCompleted do
-        monitorPerformance()
-        
-        if State.playerAlive and not State.specialMode then
-            -- Check for Arbiter spawn
-            checkArbiterSpawned()
-            
-            -- Update target periodically
-            local target = selectTarget()
-            
-            if target then
-                if not getValidTool() then
-                    if equipTool() then
-                        task.wait(0.2)
-                    end
-                else
-                    attemptFire()
-                end
-            end
-            
-            -- SIMPLIFIED: Check Gilgamesh status every frame
-            if State.gilgameshHasSpawned and not State.gilgameshCompleted then
-                local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
-                if not gilgamesh then
-                    State.gilgameshCompleted = true
-                    break
+    warn("Gilgamesh defeated! Preparing for dungeon entry...")
+    
+    task.wait(3)
+    
+    local tool = getValidTool()
+    if tool and tool.Tool then
+        tool.Tool.Parent = player.Backpack
+    end
+    
+    task.wait(1)
+    
+    local character = player.Character
+    if character then
+        local artifact = character:FindFirstChild("Mysterious Artifact")
+        if not artifact then
+            local backpack = player:FindFirstChild("Backpack")
+            if backpack then
+                artifact = backpack:FindFirstChild("Mysterious Artifact")
+                if artifact then
+                    artifact.Parent = character
                 end
             end
         end
         
-        heartbeat:Wait()
+        if artifact then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid:EquipTool(artifact)
+            end
+        end
     end
     
-    if State.gilgameshCompleted then
+    task.wait(2)
+    
+    pcall(function()
+        local args = {
+            [1] = "createParty",
+            [2] = {
+                ["settings"] = {
+                    ["FriendsOnly"] = false,
+                    ["Visual"] = true
+                },
+                ["subplace"] = "Stronghold"
+            }
+        }
+        
+        local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
+        partyRemote:InvokeServer(unpack(args))
+        warn("Party created!")
+    end)
+    
+    task.wait(3)
+    
+    pcall(function()
+        local args = {
+            [1] = "joinSubplace",
+            [2] = {}
+        }
+        
+        local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
+        partyRemote:InvokeServer(unpack(args))
+        warn("Joined dungeon!")
+    end)
+    
+    warn("Dungeon sequence completed!")
+end
+
+-- Function to check Gilgamesh status (from original)
+local function checkGilgameshStatus()
+    local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
+    
+    if gilgamesh then
+        State.gilgameshHasSpawned = true
+        
+        local humanoid = gilgamesh:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            if humanoid.Health <= 0 then
+                return "dead"
+            else
+                return "alive"
+            end
+        else
+            return "spawning"
+        end
+    else
+        return "not_spawned"
+    end
+end
+
+-- Main farming loop (matches original timing)
+local function farmingLoop()
+    local heartbeat = RunService.Heartbeat
+    local lastEnemyCheck = 0
+    local enemyCheckInterval = 0.3
+    local lastGilgameshCheck = 0
+    local gilgameshCheckInterval = 1
+    
+    while State.isRunning and not State.gilgameshCompleted do
+        local now = tick()
+        
+        State.playerAlive = isPlayerAlive()
+        
+        if State.playerAlive then
+            if now - lastGilgameshCheck > gilgameshCheckInterval then
+                local gilgameshStatus = checkGilgameshStatus()
+                
+                if State.gilgameshHasSpawned and gilgameshStatus == "dead" and not State.gilgameshCompleted then
+                    handleGilgameshCompletion()
+                    break
+                end
+                
+                lastGilgameshCheck = now
+            end
+            
+            if now - lastEnemyCheck > enemyCheckInterval then
+                State.currentTarget = selectTarget()
+                lastEnemyCheck = now
+            end
+            
+            if State.currentTarget then
+                if not getValidTool() then
+                    equipTool()
+                end
+                
+                if now - State.lastFireTime >= CONFIG.FIRE_RATE then
+                    State.lastFireTime = now
+                    attemptFire()
+                end
+            end
+        else
+            State.currentTarget = nil
+        end
+        
+        heartbeat:Wait()
+    end
+end
+
+-- Character handling
+local function onCharacterAdded(character)
+    warn("Character added, setting up...")
+    task.wait(2)
+    
+    setupDeathMonitoring()
+    setupHealthMonitoring()
+    
+    -- Teleport to position if in specific game (only once)
+    if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
+        warn("Teleporting to position in specific game...")
+        task.wait(1)
+        teleportToPosition()
+    end
+    
+    -- Send skip commands in specific game
+    if game.PlaceId == SPECIFIC_PLACE_ID and (not State.skipAllSaid or not State.skipSaid) then
+        warn("Game is place ID 96516249626799, sending skip commands...")
         task.spawn(function()
-            task.wait(2)
-            warn("Transitioning to dungeon sequence...")
+            sendSkipCommands()
         end)
+    else
+        if State.skipAllSaid and State.skipSaid then
+            warn("Skip commands already sent this session")
+        elseif game.PlaceId ~= SPECIFIC_PLACE_ID then
+            warn("Not the right place for skip commands, place ID:", game.PlaceId)
+        end
+    end
+    
+    if State.isRunning and not State.specialMode and not State.gilgameshCompleted then
+        if isPlayerAlive() then
+            equipTool()
+        end
     end
 end
 
@@ -661,59 +805,23 @@ end
 local function initialize()
     warn("🚀 Starting AutoFarm initialization...")
     
-    local function setupCharacter()
-        warn("Setting up character...")
-        setupHealthMonitoring()
-        
-        if game.PlaceId == SPECIFIC_PLACE_ID then
-            if not State.teleported then
-                warn("Teleporting to position...")
-                task.wait(2)
-                teleportToPosition()
-            end
-            
-            if not State.skipAllSaid or not State.skipSaid then
-                warn("Sending skip commands...")
-                task.wait(3)
-                sendSkipCommands()
-            end
-        end
-        
-        -- Auto-equip tool on startup
-        task.wait(1)
-        if equipTool() then
-            warn("✓ AutoFarm initialized successfully!")
-        else
-            warn("⚠️ Could not equip tool initially, will retry when needed")
-        end
+    if not player.Character then
+        warn("Waiting for character...")
+        player.CharacterAdded:Wait()
     end
     
-    if player.Character then
-        setupCharacter()
-    end
+    player.CharacterAdded:Connect(onCharacterAdded)
     
-    local charAddedConn = player.CharacterAdded:Connect(function(char)
-        warn("Character added, re-initializing...")
-        task.wait(2)
-        setupCharacter()
-    end)
+    onCharacterAdded(player.Character)
     
-    table.insert(State.connectionPool, charAddedConn)
-    
-    -- Start main loop
-    warn("Starting farming loop...")
     task.spawn(farmingLoop)
     
-    -- Memory management loop
+    -- Memory management
     task.spawn(function()
-        while State.isRunning do
-            task.wait(30)
-            cleanConnectionPool()
-            updateWorkspaceCache()
-            
-            if tick() % 120 < 1 then
-                collectgarbage("collect")
-            end
+        while State.isRunning and not State.gilgameshCompleted do
+            task.wait(60)
+            ObjectPools.workspaceCache = {}
+            collectgarbage("collect")
         end
     end)
 end
@@ -778,7 +886,7 @@ return {
             TargetsCached = #ObjectPools.enemyCache,
             ArbiterSpawned = State.arbiterSpawned,
             CurrentTarget = State.currentTarget and State.currentTarget.Name or "None",
-            ToolEquipped = cachedToolData ~= nil
+            ToolEquipped = getValidTool() ~= nil
         }
     end,
     
@@ -786,18 +894,14 @@ return {
         collectgarbage("collect")
         cleanConnectionPool()
         ObjectPools.enemyCache = {}
-        cachedToolData = nil
+        ObjectPools.workspaceCache = {}
     end,
     
-    GetTargetInfo = function()
-        if State.currentTarget then
-            return {
-                Name = State.currentTarget.Name,
-                ShootPosition = State.currentTarget.ShootPosition,
-                ActualPosition = State.currentTarget.TargetPart and State.currentTarget.TargetPart.Position,
-                HasFixedPosition = State.currentTarget.HasFixedPosition
-            }
-        end
-        return nil
+    ForceSkipCommands = function()
+        sendSkipCommands()
+    end,
+    
+    TeleportToPosition = function()
+        teleportToPosition()
     end
 }
