@@ -1,4 +1,3 @@
--- Wait for game and local player to fully load
 repeat task.wait() until game:IsLoaded()
 local Players = game:GetService("Players")
 repeat task.wait() until Players.LocalPlayer
@@ -10,7 +9,6 @@ local TextChatService = game:GetService("TextChatService")
 local TweenService = game:GetService("TweenService")
 local TeleportService = game:GetService("TeleportService")
 
--- Configuration
 local CONFIG = {
     FIRE_RATE = 0.05,
     TOOL_NAME = "Equinox Cannon",
@@ -21,11 +19,11 @@ local CONFIG = {
     MAX_TARGET_DISTANCE = 300,
     SHIELD_COOLDOWN = 5,
     ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554),
-    LIVES_CHECK_INTERVAL = 5,  -- Check every 5 seconds for performance
-    TELEPORT_RETRY_INTERVAL = 10  -- Retry teleport after 10 seconds if failed
+    LIVES_CHECK_INTERVAL = 5,
+    TELEPORT_RETRY_INTERVAL = 10,
+    RESPAWN_WAIT_TIME = 3
 }
 
--- Priority enemies
 local PRIORITY_ENEMIES = {
     ["The Arbiter"] = true,
     ["Gilgamesh, the Consumer of Reality"] = true,
@@ -33,22 +31,18 @@ local PRIORITY_ENEMIES = {
     ["Controller Turret"] = true
 }
 
--- Special target positions for specific enemies
 local SPECIAL_TARGET_POSITIONS = {
     ["The Arbiter"] = CONFIG.ARBITER_TARGET_POSITION
 }
 
--- Special target parts for specific enemies
 local SPECIAL_TARGET_PARTS = {
     ["The Arbiter"] = "HumanoidRootPart"
 }
 
--- Teleport position
 local TELEPORT_POSITION = Vector3.new(-21, 103, -469)
 local SPECIFIC_PLACE_ID = 96516249626799
-local AUTOTELEPORT_PLACE_ID = 8811271345  -- New auto-teleport place ID
+local AUTOTELEPORT_PLACE_ID = 8811271345
 
--- State management
 local State = {
     isRunning = true,
     specialMode = false,
@@ -71,19 +65,19 @@ local State = {
     lastArbiterCheck = 0,
     livesChecked = false,
     lastLivesCheck = 0,
-    dungeonTriggered = false,  -- Track if dungeon has been triggered
-    teleportRetryCount = 0,    -- Track teleport retries
-    lastTeleportRetry = 0,     -- Last teleport retry time
-    autoTeleportTriggered = false  -- Track if auto-teleport has been triggered
+    dungeonTriggered = false,
+    teleportRetryCount = 0,
+    lastTeleportRetry = 0,
+    autoTeleportTriggered = false,
+    waitingForRespawn = false,
+    respawnCheckTime = 0
 }
 
--- Object pools for memory efficiency
 local ObjectPools = {
     enemyCache = {},
     workspaceCache = {}
 }
 
--- Get TextChatService channel safely
 local function getChatChannel()
     if TextChatService.ChatVersion == Enum.ChatVersion.LegacyChatService then
         return nil
@@ -106,7 +100,6 @@ local function getChatChannel()
     return nil
 end
 
--- Optimized chat message function
 local chatChannel = getChatChannel()
 local function chatMessage(str)
     if type(str) ~= "string" then str = tostring(str) end
@@ -128,7 +121,6 @@ local function chatMessage(str)
     end
 end
 
--- Function to check Lives value (optimized for performance)
 local function checkLives()
     local now = tick()
     if now - State.lastLivesCheck < CONFIG.LIVES_CHECK_INTERVAL then
@@ -137,16 +129,15 @@ local function checkLives()
     
     State.lastLivesCheck = now
     
-    -- Check if Lives StringValue exists
     local livesValue = player:FindFirstChild("Lives")
     if livesValue and livesValue:IsA("StringValue") then
         local livesText = livesValue.Value
-        
-        -- Try to convert to number
         local livesNumber = tonumber(livesText)
         
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
+            State.waitingForRespawn = true
+            State.respawnCheckTime = now
             return true
         end
     end
@@ -154,7 +145,23 @@ local function checkLives()
     return false
 end
 
--- Function to check if auto-teleport should trigger based on place ID
+local function checkRespawnStatus()
+    if not State.waitingForRespawn then
+        return false
+    end
+    
+    local now = tick()
+    
+    if State.playerAlive then
+        if now - State.respawnCheckTime > CONFIG.RESPAWN_WAIT_TIME then
+            State.waitingForRespawn = false
+            return true
+        end
+    end
+    
+    return false
+end
+
 local function checkAutoTeleport()
     if State.autoTeleportTriggered then
         return false
@@ -168,35 +175,28 @@ local function checkAutoTeleport()
     return false
 end
 
--- Function to check teleport state and retry if failed
 local function checkTeleportState()
     local now = tick()
     
-    -- Only check if dungeon was triggered and enough time has passed
     if not State.dungeonTriggered or now - State.lastTeleportRetry < CONFIG.TELEPORT_RETRY_INTERVAL then
         return false
     end
     
-    -- Check teleport state
     local teleportState = TeleportService:GetTeleportState()
     
     if teleportState == Enum.TeleportState.Failed then
         State.lastTeleportRetry = now
         State.teleportRetryCount = State.teleportRetryCount + 1
-        
-        -- Reset dungeon trigger to allow retry
         State.dungeonTriggered = false
         State.bossCompleted = false
         State.specialMode = false
         State.isRunning = true
-        
         return true
     end
     
     return false
 end
 
--- Check if The Arbiter has spawned
 local function checkArbiterSpawned()
     local now = tick()
     if now - State.lastArbiterCheck < 1 then
@@ -210,14 +210,11 @@ local function checkArbiterSpawned()
     return State.arbiterSpawned
 end
 
--- Get target position for specific enemy
 local function getTargetPositionForEnemy(enemyName, enemyModel)
-    -- Check if this enemy has a fixed target position
     if SPECIAL_TARGET_POSITIONS[enemyName] then
         return SPECIAL_TARGET_POSITIONS[enemyName]
     end
     
-    -- For other enemies, get their actual part position
     local specialPartName = SPECIAL_TARGET_PARTS[enemyName]
     if specialPartName then
         local specialPart = enemyModel:FindFirstChild(specialPartName)
@@ -226,7 +223,6 @@ local function getTargetPositionForEnemy(enemyName, enemyModel)
         end
     end
     
-    -- Default fallback
     return enemyModel:FindFirstChild("HumanoidRootPart") or 
            enemyModel:FindFirstChild("Torso") or 
            enemyModel:FindFirstChild("UpperTorso") or
@@ -234,11 +230,9 @@ local function getTargetPositionForEnemy(enemyName, enemyModel)
            enemyModel:FindFirstChild("Chest")
 end
 
--- Get target part for validation
 local function getTargetPartForValidation(model)
     local enemyName = model.Name
     
-    -- Check if this enemy has a special target part
     if SPECIAL_TARGET_PARTS[enemyName] then
         local specialPart = model:FindFirstChild(SPECIAL_TARGET_PARTS[enemyName])
         if specialPart then
@@ -246,7 +240,6 @@ local function getTargetPartForValidation(model)
         end
     end
     
-    -- Default part search order for regular enemies
     return model:FindFirstChild("HumanoidRootPart") or 
            model:FindFirstChild("Torso") or 
            model:FindFirstChild("UpperTorso") or
@@ -254,7 +247,6 @@ local function getTargetPartForValidation(model)
            model:FindFirstChild("Chest")
 end
 
--- Optimized object cleanup
 local function cleanConnectionPool()
     for i = #State.connectionPool, 1, -1 do
         local connection = State.connectionPool[i]
@@ -264,7 +256,6 @@ local function cleanConnectionPool()
     end
 end
 
--- Optimized workspace children cache
 local function updateWorkspaceCache()
     local now = tick()
     if now - State.lastWorldUpdate > CONFIG.WORLD_UPDATE_INTERVAL then
@@ -275,13 +266,11 @@ local function updateWorkspaceCache()
     return false
 end
 
--- Optimized enemy detection
 local function findEnemies()
     if not State.playerAlive then return ObjectPools.enemyCache end
     
     updateWorkspaceCache()
     
-    -- Clear cache
     for i = #ObjectPools.enemyCache, 1, -1 do
         ObjectPools.enemyCache[i] = nil
     end
@@ -297,7 +286,6 @@ local function findEnemies()
             local humanoid = model:FindFirstChildOfClass("Humanoid")
             
             if enemyMain and humanoid and humanoid.Health > 0 then
-                -- Get the correct target part for this enemy
                 local targetPart = getTargetPartForValidation(model)
                 if targetPart then
                     local enemyData = {
@@ -310,7 +298,6 @@ local function findEnemies()
                         LastSeen = tick()
                     }
                     
-                    -- Check for boss spawns (Gilgamesh or its rare variation)
                     if model.Name == "Gilgamesh, the Consumer of Reality" or 
                        model.Name == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
                         State.bossHasSpawned = true
@@ -337,7 +324,6 @@ local function findEnemies()
     return ObjectPools.enemyCache
 end
 
--- Function to select best target with priority
 local function selectTarget()
     if not State.playerAlive then return nil end
     
@@ -393,7 +379,6 @@ local function selectTarget()
     return closestEnemy
 end
 
--- Add missing equipTool function
 local function equipTool()
     if not State.playerAlive then 
         task.wait(0.5)
@@ -440,7 +425,6 @@ local function equipTool()
     return false
 end
 
--- Optimized function to get valid tool
 local function getValidTool()
     if not State.playerAlive then return nil end
     
@@ -460,7 +444,6 @@ local function getValidTool()
     return nil
 end
 
--- Optimized firing logic with special target part handling
 local function attemptFire()
     if not State.isRunning or State.specialMode or State.bossCompleted then return end
     if not State.playerAlive then return end
@@ -484,10 +467,9 @@ local function attemptFire()
     
     State.lastFireTime = now
     
-    -- Get target position (fixed for Arbiter at 2170, 14, 1554, actual for others)
     local targetPos
     if State.currentTarget.Name == "The Arbiter" then
-        targetPos = CONFIG.ARBITER_TARGET_POSITION  -- 2170, 14, 1554
+        targetPos = CONFIG.ARBITER_TARGET_POSITION
     else
         targetPos = State.currentTarget.TargetPart.Position
     end
@@ -498,7 +480,6 @@ local function attemptFire()
     local cameraPosition = camera.CFrame.Position
     local cameraToTarget = (targetPos - cameraPosition).Unit
     
-    -- Shoot directly at target part
     local startPos = targetPos
     local endPos = targetPos
     
@@ -525,7 +506,6 @@ local function attemptFire()
     end
 end
 
--- Optimized shield system
 local function useShield()
     local now = tick()
     if now - State.lastShieldUse < CONFIG.SHIELD_COOLDOWN then return end
@@ -546,7 +526,6 @@ local function useShield()
     end)
 end
 
--- Function to check if player is alive
 local function isPlayerAlive()
     if not player.Character then return false end
     
@@ -556,7 +535,6 @@ local function isPlayerAlive()
     return humanoid.Health > 0
 end
 
--- Optimized health monitoring
 local function setupHealthMonitoring()
     cleanConnectionPool()
     
@@ -583,7 +561,6 @@ local function setupHealthMonitoring()
     table.insert(State.connectionPool, connection)
 end
 
--- Function to monitor player death
 local function setupDeathMonitoring()
     cleanConnectionPool()
     
@@ -613,7 +590,6 @@ local function setupDeathMonitoring()
     table.insert(State.connectionPool, connection)
 end
 
--- Optimized skip commands with delay
 local function sendSkipCommands()
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
     if State.skipAllSaid and State.skipSaid then return end
@@ -634,7 +610,6 @@ local function sendSkipCommands()
     end)
 end
 
--- Optimized teleport with safety check
 local function teleportToPosition()
     if State.teleported then return end
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
@@ -652,7 +627,6 @@ local function teleportToPosition()
     tween:Play()
 end
 
--- Function to handle dungeon entry
 local function handleBossCompletion()
     if State.dungeonTriggered then return end
     
@@ -722,11 +696,8 @@ local function handleBossCompletion()
     end)
 end
 
--- Function to check boss status (Gilgamesh or its rare variation)
 local function checkBossStatus()
-    -- Check for regular Gilgamesh
     local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
-    -- Check for rare variation
     local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
     
     local boss = gilgamesh or uberBringer
@@ -749,7 +720,6 @@ local function checkBossStatus()
     end
 end
 
--- Main farming loop with all checks
 local function farmingLoop()
     local heartbeat = RunService.Heartbeat
     local lastEnemyCheck = 0
@@ -763,19 +733,28 @@ local function farmingLoop()
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
-            -- Check if auto-teleport should trigger (place ID 8811271345)
             if checkAutoTeleport() then
                 handleBossCompletion()
                 break
             end
             
-            -- Check Lives value every 5 seconds (optimized)
             if checkLives() then
+                State.isRunning = false
+                while not State.playerAlive do
+                    task.wait(0.5)
+                    State.playerAlive = isPlayerAlive()
+                end
+                
+                task.wait(CONFIG.RESPAWN_WAIT_TIME)
                 handleBossCompletion()
                 break
             end
             
-            -- Check teleport state and retry if failed
+            if checkRespawnStatus() then
+                handleBossCompletion()
+                break
+            end
+            
             if checkTeleportState() then
                 handleBossCompletion()
                 break
@@ -815,20 +794,17 @@ local function farmingLoop()
     end
 end
 
--- Character handling
 local function onCharacterAdded(character)
     task.wait(2)
     
     setupDeathMonitoring()
     setupHealthMonitoring()
     
-    -- Teleport to position if in specific game (only once)
     if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
         task.wait(1)
         teleportToPosition()
     end
     
-    -- Send skip commands in specific game
     if game.PlaceId == SPECIFIC_PLACE_ID and (not State.skipAllSaid or not State.skipSaid) then
         task.spawn(function()
             sendSkipCommands()
@@ -842,7 +818,6 @@ local function onCharacterAdded(character)
     end
 end
 
--- Optimized initialization
 local function initialize()
     if not player.Character then
         player.CharacterAdded:Wait()
@@ -854,11 +829,9 @@ local function initialize()
     
     task.spawn(farmingLoop)
     
-    -- SIMPLIFIED memory management
     task.spawn(function()
         while State.isRunning and not State.bossCompleted do
             task.wait(60)
-            -- Just clear caches periodically
             ObjectPools.workspaceCache = {}
             ObjectPools.enemyCache = {}
             cleanConnectionPool()
@@ -866,9 +839,7 @@ local function initialize()
     end)
 end
 
--- Safe start with auto-execute compatibility
 local function safeStart()
-    -- Wait for everything to load
     while not game:IsLoaded() do
         task.wait(0.5)
     end
@@ -892,10 +863,8 @@ local function safeStart()
     end
 end
 
--- Auto-start the script
 task.spawn(safeStart)
 
--- Return API
 return {
     Stop = function()
         State.isRunning = false
@@ -914,7 +883,6 @@ return {
     EquipTool = equipTool,
     
     ForceCleanup = function()
-        -- Simple cleanup
         cleanConnectionPool()
         ObjectPools.enemyCache = {}
         ObjectPools.workspaceCache = {}
@@ -929,14 +897,12 @@ return {
     end,
     
     GetStatus = function()
-        -- Check current Lives value
         local livesValue = player:FindFirstChild("Lives")
         local currentLives = "Not found"
         if livesValue and livesValue:IsA("StringValue") then
             currentLives = livesValue.Value
         end
         
-        -- Get teleport state
         local teleportState = "Unknown"
         pcall(function()
             teleportState = tostring(TeleportService:GetTeleportState())
@@ -953,11 +919,12 @@ return {
             TeleportState = teleportState,
             TeleportRetryCount = State.teleportRetryCount,
             AutoTeleportTriggered = State.autoTeleportTriggered,
-            CurrentPlaceId = game.PlaceId
+            CurrentPlaceId = game.PlaceId,
+            WaitingForRespawn = State.waitingForRespawn,
+            PlayerAlive = State.playerAlive
         }
     end,
     
-    -- New function to manually trigger dungeon entry
     TriggerDungeon = function()
         if not State.dungeonTriggered then
             handleBossCompletion()
