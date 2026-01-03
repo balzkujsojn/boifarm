@@ -26,6 +26,7 @@ local CONFIG = {
 local PRIORITY_ENEMIES = {
     ["The Arbiter"] = true,
     ["Gilgamesh, the Consumer of Reality"] = true,
+    ["The Supreme Uber Bringer of Light and Space Time Annihilation"] = true,  -- Added rare variation
     ["Controller Turret"] = true
 }
 
@@ -50,8 +51,8 @@ local State = {
     lastFireTime = 0,
     currentTarget = nil,
     chargeValue = 100,
-    gilgameshHasSpawned = false,
-    gilgameshCompleted = false,
+    bossHasSpawned = false,  -- Changed from gilgameshHasSpawned
+    bossCompleted = false,    -- Changed from gilgameshCompleted
     playerAlive = true,
     skipSaid = false,
     skipAllSaid = false,
@@ -231,8 +232,10 @@ local function findEnemies()
                         LastSeen = tick()
                     }
                     
-                    if model.Name == "Gilgamesh, the Consumer of Reality" or "The Supreme Uber Bringer of Light and Space Time Annihilation" then
-                        State.gilgameshHasSpawned = true
+                    -- Check for boss spawns (Gilgamesh or its rare variation)
+                    if model.Name == "Gilgamesh, the Consumer of Reality" or 
+                       model.Name == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
+                        State.bossHasSpawned = true
                     elseif model.Name == "The Arbiter" then
                         State.arbiterSpawned = true
                     end
@@ -381,7 +384,7 @@ end
 
 -- Optimized firing logic with special target part handling
 local function attemptFire()
-    if not State.isRunning or State.specialMode or State.gilgameshCompleted then return end
+    if not State.isRunning or State.specialMode or State.bossCompleted then return end
     if not State.playerAlive then return end
     
     State.currentTarget = selectTarget()
@@ -516,7 +519,7 @@ local function setupDeathMonitoring()
             State.shieldUsed = false
         elseif health > 0 and not wasAlive then
             task.wait(1.5)
-            if State.isRunning and not State.specialMode and not State.gilgameshCompleted then
+            if State.isRunning and not State.specialMode and not State.bossCompleted then
                 equipTool()
                 State.shieldUsed = false
             end
@@ -567,9 +570,9 @@ local function teleportToPosition()
 end
 
 -- Function to handle dungeon entry
-local function handleGilgameshCompletion()
-    if State.gilgameshCompleted then return end
-    State.gilgameshCompleted = true
+local function handleBossCompletion()
+    if State.bossCompleted then return end
+    State.bossCompleted = true
     State.specialMode = true
     State.isRunning = false
     
@@ -634,14 +637,19 @@ local function handleGilgameshCompletion()
     end)
 end
 
--- Function to check Gilgamesh status
-local function checkGilgameshStatus()
+-- Function to check boss status (Gilgamesh or its rare variation)
+local function checkBossStatus()
+    -- Check for regular Gilgamesh
     local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
+    -- Check for rare variation
+    local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
     
-    if gilgamesh then
-        State.gilgameshHasSpawned = true
+    local boss = gilgamesh or uberBringer
+    
+    if boss then
+        State.bossHasSpawned = true
         
-        local humanoid = gilgamesh:FindFirstChildOfClass("Humanoid")
+        local humanoid = boss:FindFirstChildOfClass("Humanoid")
         if humanoid then
             if humanoid.Health <= 0 then
                 return "dead"
@@ -661,24 +669,24 @@ local function farmingLoop()
     local heartbeat = RunService.Heartbeat
     local lastEnemyCheck = 0
     local enemyCheckInterval = 0.3
-    local lastGilgameshCheck = 0
-    local gilgameshCheckInterval = 1
+    local lastBossCheck = 0
+    local bossCheckInterval = 1
     
-    while State.isRunning and not State.gilgameshCompleted do
+    while State.isRunning and not State.bossCompleted do
         local now = tick()
         
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
-            if now - lastGilgameshCheck > gilgameshCheckInterval then
-                local gilgameshStatus = checkGilgameshStatus()
+            if now - lastBossCheck > bossCheckInterval then
+                local bossStatus = checkBossStatus()
                 
-                if State.gilgameshHasSpawned and gilgameshStatus == "dead" and not State.gilgameshCompleted then
-                    handleGilgameshCompletion()
+                if State.bossHasSpawned and bossStatus == "dead" and not State.bossCompleted then
+                    handleBossCompletion()
                     break
                 end
                 
-                lastGilgameshCheck = now
+                lastBossCheck = now
             end
             
             if now - lastEnemyCheck > enemyCheckInterval then
@@ -724,7 +732,7 @@ local function onCharacterAdded(character)
         end)
     end
     
-    if State.isRunning and not State.specialMode and not State.gilgameshCompleted then
+    if State.isRunning and not State.specialMode and not State.bossCompleted then
         if isPlayerAlive() then
             equipTool()
         end
@@ -743,9 +751,9 @@ local function initialize()
     
     task.spawn(farmingLoop)
     
-    -- SIMPLIFIED memory management (no collectgarbage needed)
+    -- SIMPLIFIED memory management
     task.spawn(function()
-        while State.isRunning and not State.gilgameshCompleted do
+        while State.isRunning and not State.bossCompleted do
             task.wait(60)
             -- Just clear caches periodically
             ObjectPools.workspaceCache = {}
@@ -803,7 +811,7 @@ return {
     EquipTool = equipTool,
     
     ForceCleanup = function()
-        -- Simple cleanup without collectgarbage
+        -- Simple cleanup
         cleanConnectionPool()
         ObjectPools.enemyCache = {}
         ObjectPools.workspaceCache = {}
@@ -815,5 +823,14 @@ return {
     
     TeleportToPosition = function()
         teleportToPosition()
+    end,
+    
+    GetStatus = function()
+        return {
+            BossSpawned = State.bossHasSpawned,
+            BossCompleted = State.bossCompleted,
+            ArbiterSpawned = State.arbiterSpawned,
+            CurrentTarget = State.currentTarget and State.currentTarget.Name or "None"
+        }
     end
 }
