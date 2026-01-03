@@ -8,6 +8,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TextChatService = game:GetService("TextChatService")
 local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
 
 -- Configuration
 local CONFIG = {
@@ -19,14 +20,16 @@ local CONFIG = {
     HEALTH_CHECK_INTERVAL = 1,
     MAX_TARGET_DISTANCE = 300,
     SHIELD_COOLDOWN = 5,
-    ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554)
+    ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554),
+    LIVES_CHECK_INTERVAL = 5,  -- Check every 5 seconds for performance
+    TELEPORT_RETRY_INTERVAL = 10  -- Retry teleport after 10 seconds if failed
 }
 
 -- Priority enemies
 local PRIORITY_ENEMIES = {
     ["The Arbiter"] = true,
     ["Gilgamesh, the Consumer of Reality"] = true,
-    ["The Supreme Uber Bringer of Light and Space Time Annihilation"] = true,  -- Added rare variation
+    ["The Supreme Uber Bringer of Light and Space Time Annihilation"] = true,
     ["Controller Turret"] = true
 }
 
@@ -43,6 +46,7 @@ local SPECIAL_TARGET_PARTS = {
 -- Teleport position
 local TELEPORT_POSITION = Vector3.new(-21, 103, -469)
 local SPECIFIC_PLACE_ID = 96516249626799
+local AUTOTELEPORT_PLACE_ID = 8811271345  -- New auto-teleport place ID
 
 -- State management
 local State = {
@@ -51,8 +55,8 @@ local State = {
     lastFireTime = 0,
     currentTarget = nil,
     chargeValue = 100,
-    bossHasSpawned = false,  -- Changed from gilgameshHasSpawned
-    bossCompleted = false,    -- Changed from gilgameshCompleted
+    bossHasSpawned = false,
+    bossCompleted = false,
     playerAlive = true,
     skipSaid = false,
     skipAllSaid = false,
@@ -64,7 +68,13 @@ local State = {
     lastTargetUpdate = 0,
     lastWorldUpdate = 0,
     arbiterSpawned = false,
-    lastArbiterCheck = 0
+    lastArbiterCheck = 0,
+    livesChecked = false,
+    lastLivesCheck = 0,
+    dungeonTriggered = false,  -- Track if dungeon has been triggered
+    teleportRetryCount = 0,    -- Track teleport retries
+    lastTeleportRetry = 0,     -- Last teleport retry time
+    autoTeleportTriggered = false  -- Track if auto-teleport has been triggered
 }
 
 -- Object pools for memory efficiency
@@ -116,6 +126,74 @@ local function chatMessage(str)
             pcall(chatChannel.SendAsync, chatChannel, str)
         end)
     end
+end
+
+-- Function to check Lives value (optimized for performance)
+local function checkLives()
+    local now = tick()
+    if now - State.lastLivesCheck < CONFIG.LIVES_CHECK_INTERVAL then
+        return false
+    end
+    
+    State.lastLivesCheck = now
+    
+    -- Check if Lives StringValue exists
+    local livesValue = player:FindFirstChild("Lives")
+    if livesValue and livesValue:IsA("StringValue") then
+        local livesText = livesValue.Value
+        
+        -- Try to convert to number
+        local livesNumber = tonumber(livesText)
+        
+        if livesNumber == 1 and not State.livesChecked then
+            State.livesChecked = true
+            return true
+        end
+    end
+    
+    return false
+end
+
+-- Function to check if auto-teleport should trigger based on place ID
+local function checkAutoTeleport()
+    if State.autoTeleportTriggered then
+        return false
+    end
+    
+    if game.PlaceId == AUTOTELEPORT_PLACE_ID then
+        State.autoTeleportTriggered = true
+        return true
+    end
+    
+    return false
+end
+
+-- Function to check teleport state and retry if failed
+local function checkTeleportState()
+    local now = tick()
+    
+    -- Only check if dungeon was triggered and enough time has passed
+    if not State.dungeonTriggered or now - State.lastTeleportRetry < CONFIG.TELEPORT_RETRY_INTERVAL then
+        return false
+    end
+    
+    -- Check teleport state
+    local teleportState = TeleportService:GetTeleportState()
+    
+    if teleportState == Enum.TeleportState.Failed then
+        State.lastTeleportRetry = now
+        State.teleportRetryCount = State.teleportRetryCount + 1
+        
+        -- Reset dungeon trigger to allow retry
+        State.dungeonTriggered = false
+        State.bossCompleted = false
+        State.specialMode = false
+        State.isRunning = true
+        
+        return true
+    end
+    
+    return false
 end
 
 -- Check if The Arbiter has spawned
@@ -401,6 +479,11 @@ local function attemptFire()
         if not toolData then return end
     end
     
+    local now = tick()
+    if now - State.lastFireTime < CONFIG.FIRE_RATE then return end
+    
+    State.lastFireTime = now
+    
     -- Get target position (fixed for Arbiter at 2170, 14, 1554, actual for others)
     local targetPos
     if State.currentTarget.Name == "The Arbiter" then
@@ -571,7 +654,9 @@ end
 
 -- Function to handle dungeon entry
 local function handleBossCompletion()
-    if State.bossCompleted then return end
+    if State.dungeonTriggered then return end
+    
+    State.dungeonTriggered = true
     State.bossCompleted = true
     State.specialMode = true
     State.isRunning = false
@@ -664,7 +749,7 @@ local function checkBossStatus()
     end
 end
 
--- Main farming loop
+-- Main farming loop with all checks
 local function farmingLoop()
     local heartbeat = RunService.Heartbeat
     local lastEnemyCheck = 0
@@ -678,6 +763,24 @@ local function farmingLoop()
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
+            -- Check if auto-teleport should trigger (place ID 8811271345)
+            if checkAutoTeleport() then
+                handleBossCompletion()
+                break
+            end
+            
+            -- Check Lives value every 5 seconds (optimized)
+            if checkLives() then
+                handleBossCompletion()
+                break
+            end
+            
+            -- Check teleport state and retry if failed
+            if checkTeleportState() then
+                handleBossCompletion()
+                break
+            end
+            
             if now - lastBossCheck > bossCheckInterval then
                 local bossStatus = checkBossStatus()
                 
@@ -826,11 +929,38 @@ return {
     end,
     
     GetStatus = function()
+        -- Check current Lives value
+        local livesValue = player:FindFirstChild("Lives")
+        local currentLives = "Not found"
+        if livesValue and livesValue:IsA("StringValue") then
+            currentLives = livesValue.Value
+        end
+        
+        -- Get teleport state
+        local teleportState = "Unknown"
+        pcall(function()
+            teleportState = tostring(TeleportService:GetTeleportState())
+        end)
+        
         return {
             BossSpawned = State.bossHasSpawned,
             BossCompleted = State.bossCompleted,
             ArbiterSpawned = State.arbiterSpawned,
-            CurrentTarget = State.currentTarget and State.currentTarget.Name or "None"
+            CurrentTarget = State.currentTarget and State.currentTarget.Name or "None",
+            LivesValue = currentLives,
+            LivesTriggered = State.livesChecked,
+            DungeonTriggered = State.dungeonTriggered,
+            TeleportState = teleportState,
+            TeleportRetryCount = State.teleportRetryCount,
+            AutoTeleportTriggered = State.autoTeleportTriggered,
+            CurrentPlaceId = game.PlaceId
         }
+    end,
+    
+    -- New function to manually trigger dungeon entry
+    TriggerDungeon = function()
+        if not State.dungeonTriggered then
+            handleBossCompletion()
+        end
     end
 }
