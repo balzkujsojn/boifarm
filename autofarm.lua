@@ -48,7 +48,9 @@ local State = {
     teleported = false,
     livesChecked = false,
     lastLivesCheck = 0,
-    autoTeleportTriggered = false
+    autoTeleportTriggered = false,
+    teleportAttempts = 0,
+    maxTeleportAttempts = 3
 }
 
 local cache = {
@@ -147,6 +149,19 @@ local function checkLives()
             State.livesChecked = true
             return true
         end
+    end
+    
+    return false
+end
+
+local function checkAutoTeleport()
+    if State.autoTeleportTriggered then
+        return false
+    end
+    
+    if game.PlaceId == AUTOTELEPORT_PLACE_ID then
+        State.autoTeleportTriggered = true
+        return true
     end
     
     return false
@@ -401,7 +416,11 @@ local function attemptFire()
         targetPos = ARBITER_TARGET_POSITION
     else
         local targetPart = State.currentTarget.TargetPart
-        targetPos = targetPart.Position
+        if targetPart then
+            targetPos = targetPart.Position
+        else
+            return
+        end
     end
     
     local camera = workspace.CurrentCamera
@@ -415,18 +434,22 @@ local function attemptFire()
     local startPos = targetPos - (direction * 5)
     local endPos = targetPos
     
-    local success, result = pcall(function()
-        return toolData.Remote:InvokeServer("fire", {startPos, endPos, State.chargeValue})
+    pcall(function()
+        toolData.Remote:InvokeServer("fire", {startPos, endPos, State.chargeValue})
     end)
-    
-    if not success then
-        pcall(function()
-            return toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
-        end)
-    end
 end
 
-local function handleDungeonTeleport()
+local function checkTeleportSuccess()
+    task.wait(15)
+    
+    if game.PlaceId == SPECIFIC_PLACE_ID then
+        return false
+    end
+    
+    return true
+end
+
+local function attemptDungeonTeleport()
     if State.bossCompleted then 
         return 
     end
@@ -467,23 +490,56 @@ local function handleDungeonTeleport()
     
     task.wait(2)
     
-    pcall(function()
-        local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
-        partyRemote:InvokeServer("createParty", {
-            settings = {
-                FriendsOnly = false,
-                Visual = true
-            },
-            subplace = "Stronghold"
-        })
-    end)
+    for attempt = 1, State.maxTeleportAttempts do
+        State.teleportAttempts = attempt
+        
+        local createSuccess = pcall(function()
+            local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
+            return partyRemote:InvokeServer("createParty", {
+                settings = {
+                    FriendsOnly = false,
+                    Visual = true
+                },
+                subplace = "Stronghold"
+            })
+        end)
+        
+        if not createSuccess then
+            task.wait(2)
+            continue
+        end
+        
+        task.wait(3)
+        
+        local joinSuccess = pcall(function()
+            local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
+            return partyRemote:InvokeServer("joinSubplace", {})
+        end)
+        
+        if joinSuccess then
+            local teleportSuccessful = checkTeleportSuccess()
+            if teleportSuccessful then
+                return true
+            end
+        end
+        
+        if attempt < State.maxTeleportAttempts then
+            task.wait(10)
+        end
+    end
     
-    task.wait(3)
+    return false
+end
+
+local function handleDungeonTeleport()
+    local success = attemptDungeonTeleport()
     
-    pcall(function()
-        local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
-        partyRemote:InvokeServer("joinSubplace", {})
-    end)
+    if not success then
+        State.bossCompleted = false
+        State.specialMode = false
+        State.isRunning = true
+        State.livesChecked = false
+    end
 end
 
 local function checkBossStatus()
@@ -521,6 +577,11 @@ local function farmingLoop()
         
         if State.playerAlive then
             if checkLives() then
+                handleDungeonTeleport()
+                break
+            end
+            
+            if checkAutoTeleport() then
                 handleDungeonTeleport()
                 break
             end
@@ -646,7 +707,8 @@ return {
             LivesTriggered = State.livesChecked,
             AutoTeleportTriggered = State.autoTeleportTriggered,
             CurrentPlaceId = game.PlaceId,
-            PlayerAlive = State.playerAlive
+            PlayerAlive = State.playerAlive,
+            TeleportAttempts = State.teleportAttempts
         }
     end,
     
