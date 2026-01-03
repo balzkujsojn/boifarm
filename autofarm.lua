@@ -8,7 +8,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TextChatService = game:GetService("TextChatService")
 local TweenService = game:GetService("TweenService")
 local TeleportService = game:GetService("TeleportService")
-local GuiService = game:GetService("GuiService")
 
 local CONFIG = {
     FIRE_RATE = 0.05,
@@ -30,7 +29,6 @@ local SPECIAL_TARGET_PARTS = {
 local TELEPORT_POSITION = Vector3.new(-21, 103, -469)
 local SPECIFIC_PLACE_ID = 96516249626799
 local AUTOTELEPORT_PLACE_ID = 8811271345
-local REJOIN_GAME_ID = 8811271345  -- Balanced Craftwars Overhaul
 
 local ARBITER_TARGET_POSITION = Vector3.new(2170, 14, 1554)
 
@@ -54,9 +52,7 @@ local State = {
     autoTeleportTriggered = false,
     teleportAttempts = 0,
     maxTeleportAttempts = 3,
-    teleportInProgress = false,
-    rejoinAttempts = 0,
-    maxRejoinAttempts = 3
+    teleportInProgress = false
 }
 
 local cache = {
@@ -140,7 +136,7 @@ end
 
 local function checkLives()
     local now = tick()
-    if now - State.lastLivesCheck < 5 then
+    if now - State.lastLivesCheck < 2 then  -- Check more frequently (2 seconds)
         return false
     end
     
@@ -150,9 +146,15 @@ local function checkLives()
     if livesValue and livesValue:IsA("NumberValue") then
         local livesNumber = livesValue.Value
         
+        -- If lives reach 1, trigger dungeon teleport
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
             return true
+        end
+        
+        -- Reset trigger if lives go back above 1 (for testing or if revived)
+        if livesNumber > 1 then
+            State.livesChecked = false
         end
     end
     
@@ -624,76 +626,6 @@ local function checkBossStatus()
     end
 end
 
-local function rejoinGame()
-    State.rejoinAttempts = State.rejoinAttempts + 1
-    
-    if State.rejoinAttempts > State.maxRejoinAttempts then
-        return false
-    end
-    
-    task.wait(1)
-    
-    local success = pcall(function()
-        -- Try to join a public server of the target game
-        TeleportService:TeleportToPlaceInstance(REJOIN_GAME_ID, "", player)
-        return true
-    end)
-    
-    if not success then
-        task.wait(3)
-        return rejoinGame()
-    end
-    
-    return true
-end
-
-local function closeAndRejoin()
-    State.isRunning = false
-    
-    task.wait(1)
-    
-    local success = rejoinGame()
-    
-    if not success then
-        task.wait(2)
-        
-        pcall(function()
-            -- Fallback: Use GuiService to return to home
-            GuiService:ClearError()
-            GuiService:ReturnToHome()
-        end)
-        
-        task.wait(3)
-        
-        pcall(function()
-            -- Try one more time to join after returning home
-            game:GetService("TeleportService"):Teleport(REJOIN_GAME_ID, player)
-        end)
-    end
-end
-
-local function setupKickDetection()
-    Players.PlayerRemoving:Connect(function(removedPlayer)
-        if removedPlayer == player then
-            task.spawn(function()
-                closeAndRejoin()
-            end)
-        end
-    end)
-end
-
-local function setupAutoRejoin()
-    -- Also check for disconnection errors
-    local connection
-    connection = game:GetService("NetworkClient").ConnectionLost:Connect(function()
-        connection:Disconnect()
-        task.spawn(function()
-            task.wait(2)
-            closeAndRejoin()
-        end)
-    end)
-end
-
 local function farmingLoop()
     local lastBossCheck = 0
     local bossCheckInterval = 2
@@ -704,6 +636,7 @@ local function farmingLoop()
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
+            -- Check lives FIRST (highest priority)
             if checkLives() then
                 handleDungeonTeleport()
                 break
@@ -764,9 +697,6 @@ local function initialize()
     
     player.CharacterAdded:Connect(onCharacterAdded)
     
-    setupKickDetection()
-    setupAutoRejoin()
-    
     onCharacterAdded(player.Character)
     
     task.spawn(farmingLoop)
@@ -802,6 +732,24 @@ task.spawn(function()
         pcall(initialize)
     end
 end)
+
+-- Debug function to manually check lives
+local function debugCheckLives()
+    local livesValue = player:FindFirstChild("Lives")
+    if livesValue and livesValue:IsA("NumberValue") then
+        print("[DEBUG] Current lives:", livesValue.Value)
+        print("[DEBUG] Lives checked flag:", State.livesChecked)
+        print("[DEBUG] Boss completed:", State.bossCompleted)
+        print("[DEBUG] Is running:", State.isRunning)
+        
+        if livesValue.Value == 1 and not State.bossCompleted and State.isRunning then
+            print("[DEBUG] Lives at 1, triggering dungeon teleport...")
+            handleDungeonTeleport()
+        end
+    else
+        print("[DEBUG] Lives value not found!")
+    end
+end
 
 return {
     Stop = function()
@@ -843,8 +791,7 @@ return {
             PlayerAlive = State.playerAlive,
             TeleportAttempts = State.teleportAttempts,
             TeleportState = TeleportService:GetLocalPlayerTeleportState(),
-            ShieldUsed = State.shieldUsed,
-            RejoinAttempts = State.rejoinAttempts
+            ShieldUsed = State.shieldUsed
         }
     end,
     
@@ -854,7 +801,5 @@ return {
         end
     end,
     
-    RejoinGame = function()
-        closeAndRejoin()
-    end
+    DebugCheckLives = debugCheckLives  -- Added for debugging
 }
