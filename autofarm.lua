@@ -58,7 +58,8 @@ local State = {
     maxShootingErrors = 10,
     lastToolEquipTime = 0,
     toolEquipCooldown = 2,
-    arbiterPresent = false
+    arbiterPresent = false,
+    arbiterForceShoot = false
 }
 
 local cache = {
@@ -338,7 +339,23 @@ local function selectTarget()
     local enemies = findEnemies()
     
     if #enemies == 0 then
+        State.arbiterForceShoot = false
         return nil
+    end
+    
+    if State.currentTarget and State.currentTarget.IsArbiter then
+        local arbiterModel = State.currentTarget.Model
+        if arbiterModel and arbiterModel.Parent then
+            local humanoid = arbiterModel:FindFirstChildOfClass("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                State.arbiterForceShoot = true
+                return State.currentTarget
+            else
+                State.arbiterForceShoot = false
+            end
+        else
+            State.arbiterForceShoot = false
+        end
     end
     
     if State.currentTarget then
@@ -473,12 +490,15 @@ local function attemptFire()
         return
     end
     
-    if not targetResult then
+    if not targetResult and not State.arbiterForceShoot then
         return
     end
     
-    -- Check if target is The Arbiter
-    local isArbiter = State.currentTarget.Name == "The Arbiter"
+    if State.arbiterForceShoot and (not targetResult or not targetResult.IsArbiter) then
+        return
+    end
+    
+    local isArbiter = State.arbiterForceShoot or (targetResult and targetResult.IsArbiter)
     
     local toolData
     local toolSuccess, toolResult = pcall(function()
@@ -526,10 +546,9 @@ local function attemptFire()
     
     local targetPos
     if isArbiter then
-        -- Always use fixed position for The Arbiter
         targetPos = ARBITER_TARGET_POSITION
     else
-        local targetPart = State.currentTarget.TargetPart
+        local targetPart = targetResult and targetResult.TargetPart
         if targetPart then
             targetPos = targetPart.Position
         else
@@ -555,7 +574,6 @@ local function attemptFire()
     if not fireSuccess then
         State.shootingErrors = State.shootingErrors + 1
         
-        -- If it's The Arbiter and we're getting errors, try alternative targeting
         if isArbiter then
             task.wait(0.1)
             pcall(function()
@@ -686,6 +704,7 @@ local function handleDungeonTeleport()
         State.isRunning = true
         State.livesChecked = false
         State.shootingEnabled = true
+        State.arbiterForceShoot = false
     end
 end
 
@@ -765,6 +784,7 @@ local function farmingLoop()
             attemptFire()
         else
             State.currentTarget = nil
+            State.arbiterForceShoot = false
         end
         
         RunService.Heartbeat:Wait()
@@ -796,6 +816,7 @@ local function onCharacterAdded(character)
     State.shootingEnabled = true
     State.shootingErrors = 0
     State.arbiterPresent = false
+    State.arbiterForceShoot = false
 end
 
 local function initialize()
@@ -897,7 +918,8 @@ return {
             ShootingErrors = State.shootingErrors,
             LastShotTime = State.lastFireTime,
             TimeSinceLastShot = tick() - State.lastFireTime,
-            ArbiterPresent = State.arbiterPresent
+            ArbiterPresent = State.arbiterPresent,
+            ArbiterForceShoot = State.arbiterForceShoot
         }
     end,
     
@@ -911,6 +933,7 @@ return {
         State.shootingEnabled = true
         State.shootingErrors = 0
         State.lastFireTime = 0
+        State.arbiterForceShoot = false
         equipTool()
     end
 }
