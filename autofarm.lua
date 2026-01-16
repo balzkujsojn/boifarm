@@ -55,13 +55,10 @@ local State = {
     teleportInProgress = false,
     shootingEnabled = true,
     shootingErrors = 0,
-    maxShootingErrors = 5,
+    maxShootingErrors = 10,
     lastToolEquipTime = 0,
     toolEquipCooldown = 2,
-    arbiterPresent = false,
-    arbiterAlive = false,
-    lastArbiterCheck = 0,
-    lastShotDebug = 0
+    arbiterPresent = false
 }
 
 local cache = {
@@ -260,33 +257,6 @@ local function getTargetPart(model)
     return nil
 end
 
--- Direct Arbiter check
-local function checkArbiterStatus()
-    local now = tick()
-    if now - State.lastArbiterCheck < 1 then
-        return State.arbiterAlive
-    end
-    
-    State.lastArbiterCheck = now
-    
-    local arbiter = workspace:FindFirstChild("The Arbiter")
-    if arbiter then
-        local humanoid = arbiter:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            State.arbiterPresent = true
-            State.arbiterAlive = humanoid.Health > 0
-        else
-            State.arbiterPresent = true
-            State.arbiterAlive = true
-        end
-    else
-        State.arbiterPresent = false
-        State.arbiterAlive = false
-    end
-    
-    return State.arbiterAlive
-end
-
 local function findEnemies()
     if not State.playerAlive or not State.shootingEnabled then 
         return {}
@@ -294,27 +264,6 @@ local function findEnemies()
     
     local now = tick()
     
-    -- Always check Arbiter status first
-    local arbiterAlive = checkArbiterStatus()
-    
-    -- If Arbiter is alive, return ONLY Arbiter
-    if arbiterAlive then
-        local arbiter = workspace:FindFirstChild("The Arbiter")
-        if arbiter then
-            return {{
-                Model = arbiter,
-                Humanoid = arbiter:FindFirstChildOfClass("Humanoid") or {Health = 100, MaxHealth = 100},
-                TargetPart = nil,
-                Position = ARBITER_TARGET_POSITION,
-                Name = "The Arbiter",
-                IsPriority = true,
-                LastSeen = now,
-                IsArbiter = true
-            }}
-        end
-    end
-    
-    -- Only update workspace cache if needed
     if now - cache.lastWorkspaceUpdate > cache.workspaceUpdateInterval then
         cache.workspaceChildren = workspace:GetChildren()
         cache.lastWorkspaceUpdate = now
@@ -322,14 +271,10 @@ local function findEnemies()
     
     local enemies = {}
     local priorityEnemies = {}
+    local hasArbiter = false
     
     for _, model in ipairs(cache.workspaceChildren) do
         if model:IsA("Model") and model.Parent == workspace then
-            -- Skip The Arbiter (we already handled it)
-            if model.Name == "The Arbiter" then
-                continue
-            end
-            
             local humanoid = model:FindFirstChildOfClass("Humanoid")
             
             if humanoid and humanoid.Health > 0 then
@@ -352,8 +297,13 @@ local function findEnemies()
                             Name = model.Name,
                             IsPriority = PRIORITY_ENEMIES[model.Name] == true,
                             LastSeen = now,
-                            IsArbiter = false
+                            IsArbiter = model.Name == "The Arbiter"
                         }
+                        
+                        if enemyData.IsArbiter then
+                            hasArbiter = true
+                            enemyData.IsPriority = true
+                        end
                         
                         if model.Name == "Gilgamesh, the Consumer of Reality" or 
                            model.Name == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
@@ -371,6 +321,8 @@ local function findEnemies()
         end
     end
     
+    State.arbiterPresent = hasArbiter
+    
     if #priorityEnemies > 0 then
         return priorityEnemies
     end
@@ -386,29 +338,17 @@ local function selectTarget()
     local enemies = findEnemies()
     
     if #enemies == 0 then
-        State.currentTarget = nil
         return nil
     end
     
-    -- Always check if we should be targeting Arbiter
-    local arbiterAlive = checkArbiterStatus()
-    
-    if arbiterAlive then
-        -- Look for Arbiter in the list
-        for _, enemy in ipairs(enemies) do
-            if enemy.Name == "The Arbiter" then
-                return enemy
-            end
-        end
-    end
-    
-    -- Check if current target is still valid
     if State.currentTarget then
         local targetModel = State.currentTarget.Model
         if targetModel and targetModel.Parent then
             local humanoid = targetModel:FindFirstChildOfClass("Humanoid")
             if humanoid and humanoid.Health > 0 then
-                return State.currentTarget
+                if State.currentTarget.IsPriority then
+                    return State.currentTarget
+                end
             end
         end
     end
@@ -468,7 +408,7 @@ local function equipTool()
     
     if not State.playerAlive then 
         task.wait(0.5)
-        return false
+        return equipTool()
     end
     
     if now - State.lastToolEquipTime < State.toolEquipCooldown then
@@ -478,13 +418,13 @@ local function equipTool()
     local character = player.Character
     if not character then 
         task.wait(0.5)
-        return false
+        return equipTool()
     end
     
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid then 
         task.wait(0.5)
-        return false
+        return equipTool()
     end
     
     local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
@@ -526,7 +466,7 @@ local function attemptFire()
         State.shootingErrors = State.shootingErrors + 1
         if State.shootingErrors > State.maxShootingErrors then
             State.shootingEnabled = false
-            task.wait(1)
+            task.wait(5)
             State.shootingEnabled = true
             State.shootingErrors = 0
         end
@@ -538,19 +478,43 @@ local function attemptFire()
     end
     
     -- Check if target is The Arbiter
-    local isArbiter = targetResult.Name == "The Arbiter"
+    local isArbiter = State.currentTarget.Name == "The Arbiter"
     
-    local toolData = getValidTool()
-    if not toolData then 
-        local equipped = equipTool()
-        if not equipped then 
+    local toolData
+    local toolSuccess, toolResult = pcall(function()
+        toolData = getValidTool()
+        return toolData
+    end)
+    
+    if not toolSuccess then
+        State.shootingErrors = State.shootingErrors + 1
+        return
+    end
+    
+    if not toolResult then 
+        local equipSuccess, equipResult = pcall(function()
+            return equipTool()
+        end)
+        
+        if not equipSuccess then
+            State.shootingErrors = State.shootingErrors + 1
+            return
+        end
+        
+        if not equipResult then 
             return 
         end
         
-        toolData = getValidTool()
-        if not toolData then 
+        local toolRetrySuccess, toolRetryResult = pcall(function()
+            toolData = getValidTool()
+            return toolData
+        end)
+        
+        if not toolRetrySuccess or not toolRetryResult then 
             return 
         end
+        
+        toolData = toolRetryResult
     end
     
     local now = tick()
@@ -559,14 +523,13 @@ local function attemptFire()
     end
     
     State.lastFireTime = now
-    State.lastShotDebug = now
     
     local targetPos
     if isArbiter then
         -- Always use fixed position for The Arbiter
         targetPos = ARBITER_TARGET_POSITION
     else
-        local targetPart = targetResult.TargetPart
+        local targetPart = State.currentTarget.TargetPart
         if targetPart then
             targetPos = targetPart.Position
         else
@@ -582,37 +545,27 @@ local function attemptFire()
     local cameraPosition = camera.CFrame.Position
     local direction = (targetPos - cameraPosition).Unit
     
-    local startPos = targetPos - (direction * 3)
+    local startPos = targetPos - (direction * 5)
     local endPos = targetPos
     
-    -- For Arbiter, try multiple methods
-    local fireSuccess = false
-    if isArbiter then
-        -- Method 1: Direct shooting
-        fireSuccess = pcall(function()
-            toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
-        end)
-        
-        -- Method 2: Standard shooting
-        if not fireSuccess then
-            task.wait(0.01)
-            fireSuccess = pcall(function()
-                toolData.Remote:InvokeServer("fire", {startPos, endPos, State.chargeValue})
-            end)
-        end
-    else
-        -- Regular enemy
-        fireSuccess = pcall(function()
-            toolData.Remote:InvokeServer("fire", {startPos, endPos, State.chargeValue})
-        end)
-    end
+    local fireSuccess = pcall(function()
+        toolData.Remote:InvokeServer("fire", {startPos, endPos, State.chargeValue})
+    end)
     
     if not fireSuccess then
         State.shootingErrors = State.shootingErrors + 1
         
+        -- If it's The Arbiter and we're getting errors, try alternative targeting
+        if isArbiter then
+            task.wait(0.1)
+            pcall(function()
+                toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
+            end)
+        end
+        
         if State.shootingErrors > State.maxShootingErrors then
             State.shootingEnabled = false
-            task.wait(1)
+            task.wait(3)
             State.shootingEnabled = true
             State.shootingErrors = 0
         end
@@ -761,20 +714,12 @@ local function checkBossStatus()
 end
 
 local function shootingRecoveryCheck()
-    local lastShotTime = State.lastShotDebug
+    local lastShotTime = State.lastFireTime
     local currentTime = tick()
     
     if State.shootingEnabled and State.isRunning and not State.bossCompleted and State.playerAlive then
-        if currentTime - lastShotTime > 5 then
-            -- Force shooting reset
-            State.shootingEnabled = false
-            State.shootingErrors = 0
-            task.wait(0.5)
-            State.shootingEnabled = true
-            
-            -- Force re-equip
-            task.wait(0.5)
-            pcall(equipTool)
+        if currentTime - lastShotTime > 10 then
+            State.shootingErrors = State.maxShootingErrors + 1
         end
     end
 end
@@ -783,7 +728,7 @@ local function farmingLoop()
     local lastBossCheck = 0
     local bossCheckInterval = 2
     local lastRecoveryCheck = 0
-    local recoveryCheckInterval = 3
+    local recoveryCheckInterval = 5
     
     while State.isRunning and not State.bossCompleted do
         local now = tick()
@@ -851,7 +796,6 @@ local function onCharacterAdded(character)
     State.shootingEnabled = true
     State.shootingErrors = 0
     State.arbiterPresent = false
-    State.arbiterAlive = false
 end
 
 local function initialize()
@@ -951,10 +895,9 @@ return {
             ShieldUsed = State.shieldUsed,
             ShootingEnabled = State.shootingEnabled,
             ShootingErrors = State.shootingErrors,
-            LastShotTime = State.lastShotDebug,
-            TimeSinceLastShot = tick() - State.lastShotDebug,
-            ArbiterPresent = State.arbiterPresent,
-            ArbiterAlive = State.arbiterAlive
+            LastShotTime = State.lastFireTime,
+            TimeSinceLastShot = tick() - State.lastFireTime,
+            ArbiterPresent = State.arbiterPresent
         }
     end,
     
@@ -968,7 +911,6 @@ return {
         State.shootingEnabled = true
         State.shootingErrors = 0
         State.lastFireTime = 0
-        State.lastShotDebug = 0
         equipTool()
     end
 }
