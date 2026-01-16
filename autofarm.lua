@@ -661,7 +661,7 @@ local function attemptDungeonTeleport()
             local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
             return partyRemote:InvokeServer("createParty", {
                 settings = {
-                    FriendsOnly = false,
+                    FriendsOnly = true,
                     Visual = true
                 },
                 subplace = "Stronghold"
@@ -937,3 +937,4 @@ return {
         equipTool()
     end
 }
+
