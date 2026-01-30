@@ -69,32 +69,6 @@ local cache = {
     lastPriorityCheck = 0
 }
 
-local function chatMessage(str)
-    if type(str) ~= "string" then str = tostring(str) end
-    
-    if TextChatService.ChatVersion == Enum.ChatVersion.LegacyChatService then
-        local events = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-        if events then
-            local remote = events:FindFirstChild("SayMessageRequest")
-            if remote then
-                task.spawn(function()
-                    pcall(remote.FireServer, remote, str, "All")
-                end)
-            end
-        end
-    else
-        local channel = TextChatService:FindFirstChild("TextChannels")
-        if channel then
-            channel = channel:FindFirstChild("RBXGeneral")
-            if channel and channel:IsA("TextChannel") then
-                task.spawn(function()
-                    pcall(channel.SendAsync, channel, str)
-                end)
-            end
-        end
-    end
-end
-
 local function sendSkipCommands()
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
     if State.skipAllSaid and State.skipSaid then return end
@@ -102,15 +76,35 @@ local function sendSkipCommands()
     task.spawn(function()
         if not State.skipAllSaid then
             task.wait(0.5)
-            chatMessage("/skipall")
-            State.skipAllSaid = true
+            -- Use new command system for /skipall
+            local success = pcall(function()
+                local args = {
+                    [1] = "skipall"
+                }
+                local commandsRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Commands")
+                if commandsRemote then
+                    commandsRemote:FireServer(unpack(args))
+                    State.skipAllSaid = true
+                    return true
+                end
+            end)
         end
         
         task.wait(1)
         
         if not State.skipSaid then
-            chatMessage("/skip")
-            State.skipSaid = true
+            -- Use new command system for /skip
+            local success = pcall(function()
+                local args = {
+                    [1] = "skip"
+                }
+                local commandsRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Commands")
+                if commandsRemote then
+                    commandsRemote:FireServer(unpack(args))
+                    State.skipSaid = true
+                    return true
+                end
+            end)
         end
     end)
 end
@@ -937,4 +931,3 @@ return {
         equipTool()
     end
 }
-
