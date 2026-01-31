@@ -1,4 +1,5 @@
 repeat task.wait() until game:IsLoaded()
+print("latest version")
 local Players = game:GetService("Players")
 repeat task.wait() until Players.LocalPlayer
 local player = Players.LocalPlayer
@@ -63,9 +64,14 @@ local State = {
     dungeonTeleportQueued = false,
     lastArbiterCheck = 0,
     arbiterCheckInterval = 1,
-    bossSpawnConfirmed = false, -- NEW: Track if boss was confirmed to spawn
+    bossSpawnConfirmed = false,
     lastBossCheck = 0,
-    bossCheckCooldown = 5 -- NEW: Don't check boss status too frequently
+    bossCheckCooldown = 5,
+    forceKeepShooting = false, -- NEW: Force shooting even when no enemies found
+    lastEquipAttempt = 0,
+    equipCheckInterval = 3, -- Check tool equip every 3 seconds
+    consecutiveNoTargetCount = 0, -- Track how many times no target was found
+    maxConsecutiveNoTarget = 10 -- After 10 times with no target, force check for Arbiter
 }
 
 local cache = {
@@ -82,7 +88,6 @@ local function sendSkipCommands()
     task.spawn(function()
         if not State.skipAllSaid then
             task.wait(0.5)
-            -- Use new command system for /skipall
             local success = pcall(function()
                 local args = {
                     [1] = "skipall"
@@ -99,7 +104,6 @@ local function sendSkipCommands()
         task.wait(1)
         
         if not State.skipSaid then
-            -- Use new command system for /skip
             local success = pcall(function()
                 local args = {
                     [1] = "skip"
@@ -156,7 +160,6 @@ local function checkLives()
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
             State.dungeonTeleportQueued = true
-            print("1 life remaining, queuing dungeon teleport...")
             return true
         end
         
@@ -261,9 +264,20 @@ local function getTargetPart(model)
     return nil
 end
 
+local function checkArbiterInWorkspace()
+    local arbiter = workspace:FindFirstChild("The Arbiter")
+    if arbiter then
+        local humanoid = arbiter:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.Health > 0 then
+            return true
+        end
+    end
+    return false
+end
+
 local function findEnemies()
     if not State.playerAlive or not State.shootingEnabled then 
-        return {}, {}, false
+        return {}, {}, false, false
     end
     
     local now = tick()
@@ -286,7 +300,7 @@ local function findEnemies()
             if enemyName == "Gilgamesh, the Consumer of Reality" or 
                enemyName == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
                 hasBoss = true
-                State.bossSpawnConfirmed = true -- Boss was confirmed to spawn
+                State.bossSpawnConfirmed = true
             end
             
             local humanoid = model:FindFirstChildOfClass("Humanoid")
@@ -332,17 +346,21 @@ local function findEnemies()
         end
     end
     
+    -- Always check for Arbiter even if not found in normal search
+    if not hasArbiter then
+        hasArbiter = checkArbiterInWorkspace()
+    end
+    
     State.arbiterPresent = hasArbiter
     
-    -- Update boss status based on actual presence
+    -- Update boss status
     if hasBoss then
         State.bossHasSpawned = true
     elseif State.bossSpawnConfirmed and not hasArbiter then
-        -- Boss was confirmed to spawn, is now gone, and Arbiter isn't present
         State.bossHasSpawned = false
     end
     
-    return priorityEnemies, enemies, hasArbiter
+    return priorityEnemies, enemies, hasArbiter, hasBoss
 end
 
 local function selectTarget()
@@ -350,7 +368,21 @@ local function selectTarget()
         return nil
     end
     
-    local priorityEnemies, regularEnemies, hasArbiter = findEnemies()
+    local priorityEnemies, regularEnemies, hasArbiter, hasBoss = findEnemies()
+    
+    -- Reset no target counter if we found any enemy
+    if #priorityEnemies > 0 or #regularEnemies > 0 or hasArbiter then
+        State.consecutiveNoTargetCount = 0
+    else
+        State.consecutiveNoTargetCount = State.consecutiveNoTargetCount + 1
+    end
+    
+    -- Force keep shooting if we've had no targets for a while (Arbiter might be hiding)
+    if State.consecutiveNoTargetCount > State.maxConsecutiveNoTarget then
+        State.forceKeepShooting = true
+    else
+        State.forceKeepShooting = false
+    end
     
     -- Always prioritize Arbiter if present
     if hasArbiter then
@@ -360,6 +392,16 @@ local function selectTarget()
                 return enemy
             end
         end
+        -- If Arbiter is in workspace but not in priority list, create dummy target
+        return {
+            Model = nil,
+            Humanoid = nil,
+            TargetPart = nil,
+            Position = ARBITER_TARGET_POSITION,
+            Name = "The Arbiter",
+            IsArbiter = true,
+            IsPriority = true
+        }
     else
         State.arbiterForceShoot = false
     end
@@ -429,7 +471,7 @@ local function equipTool()
     
     if not State.playerAlive then 
         task.wait(0.5)
-        return equipTool()
+        return false
     end
     
     if now - State.lastToolEquipTime < State.toolEquipCooldown then
@@ -439,13 +481,13 @@ local function equipTool()
     local character = player.Character
     if not character then 
         task.wait(0.5)
-        return equipTool()
+        return false
     end
     
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid then 
         task.wait(0.5)
-        return equipTool()
+        return false
     end
     
     local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
@@ -470,12 +512,44 @@ local function equipTool()
     return false
 end
 
+local function forceEquipCheck()
+    local now = tick()
+    if now - State.lastEquipAttempt < State.equipCheckInterval then
+        return
+    end
+    
+    State.lastEquipAttempt = now
+    
+    -- Force check if tool is equipped
+    local toolData = getValidTool()
+    if not toolData then
+        equipTool()
+    else
+        -- Check if tool is actually equipped
+        local character = player.Character
+        if character then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                local equippedTool = humanoid:GetEquippedTool()
+                if not equippedTool or equippedTool.Name ~= CONFIG.TOOL_NAME then
+                    humanoid:EquipTool(toolData.Tool)
+                end
+            end
+        end
+    end
+end
+
 local function attemptFire()
     if not State.isRunning or State.specialMode or State.bossCompleted then 
         return 
     end
     if not State.playerAlive or not State.shootingEnabled then 
         return 
+    end
+    
+    -- Force equip check if we haven't shot in a while
+    if tick() - State.lastFireTime > 3 then
+        forceEquipCheck()
     end
     
     local success, targetResult = pcall(function()
@@ -494,9 +568,8 @@ local function attemptFire()
         return
     end
     
-    -- Always shoot if Arbiter is present, regardless of other conditions
-    if State.arbiterPresent then
-        -- Don't return, keep shooting Arbiter
+
+    if State.arbiterPresent or State.forceKeepShoot or (State.bossSpawnConfirmed and not State.bossCompleted) then
     elseif not targetResult and not State.arbiterForceShoot then
         return
     end
@@ -546,13 +619,21 @@ local function attemptFire()
     State.lastFireTime = now
     
     local targetPos
-    if State.arbiterForceShoot and targetResult and targetResult.IsArbiter then
+    if State.arbiterForceShoot then
         targetPos = ARBITER_TARGET_POSITION
     elseif targetResult and targetResult.TargetPart then
         targetPos = targetResult.TargetPart.Position
+    elseif targetResult and targetResult.Position then
+        targetPos = targetResult.Position
     elseif State.arbiterPresent then
-        -- If Arbiter is present but we couldn't get target, shoot at Arbiter position anyway
         targetPos = ARBITER_TARGET_POSITION
+    elseif State.forceKeepShoot then
+        -- Shoot in a random direction to keep farming active
+        targetPos = Vector3.new(
+            math.random(-100, 100),
+            math.random(10, 50),
+            math.random(-100, 100)
+        )
     else
         return
     end
@@ -577,7 +658,6 @@ local function attemptFire()
         
         if State.arbiterPresent then
             task.wait(0.1)
-            -- Try shooting directly at the position if Arbiter shooting fails
             pcall(function()
                 toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
             end)
@@ -622,15 +702,10 @@ local function checkBossCompletelyGone()
     
     State.lastBossCheck = now
     
-    -- Check if bosses are completely gone from workspace
     local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
     local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
     local arbiter = workspace:FindFirstChild("The Arbiter")
     
-    -- Boss is only considered completely gone if:
-    -- 1. Boss was confirmed to spawn (State.bossSpawnConfirmed = true)
-    -- 2. Boss model is not in workspace
-    -- 3. Arbiter is not in workspace
     if State.bossSpawnConfirmed and not gilgamesh and not uberBringer and not arbiter then
         return true
     end
@@ -732,6 +807,8 @@ local function handleDungeonTeleport()
         State.dungeonTeleportQueued = false
         State.shootingEnabled = true
         State.arbiterForceShoot = false
+        State.forceKeepShooting = false
+        State.consecutiveNoTargetCount = 0
     end
 end
 
@@ -742,35 +819,16 @@ local function shootingRecoveryCheck()
     if State.shootingEnabled and State.isRunning and not State.bossCompleted and State.playerAlive then
         if currentTime - lastShotTime > 10 then
             State.shootingErrors = State.maxShootingErrors + 1
+            forceEquipCheck()
         end
     end
-end
-
-local function checkArbiterStatus()
-    local now = tick()
-    if now - State.lastArbiterCheck < State.arbiterCheckInterval then
-        return State.arbiterPresent
-    end
-    
-    State.lastArbiterCheck = now
-    local arbiter = workspace:FindFirstChild("The Arbiter")
-    
-    if arbiter then
-        local humanoid = arbiter:FindFirstChildOfClass("Humanoid")
-        if humanoid and humanoid.Health > 0 then
-            State.arbiterPresent = true
-            return true
-        end
-    end
-    
-    State.arbiterPresent = false
-    State.arbiterForceShoot = false
-    return false
 end
 
 local function farmingLoop()
     local lastRecoveryCheck = 0
     local recoveryCheckInterval = 5
+    local lastForceEquipCheck = 0
+    local forceEquipCheckInterval = 3
     
     while State.isRunning and not State.bossCompleted do
         local now = tick()
@@ -778,15 +836,16 @@ local function farmingLoop()
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
-            -- Check lives
             checkLives()
             
-            -- Check Arbiter status
-            checkArbiterStatus()
+            -- Force equip check periodically
+            if now - lastForceEquipCheck > forceEquipCheckInterval then
+                forceEquipCheck()
+                lastForceEquipCheck = now
+            end
             
-            -- Check if we should teleport (only if no Arbiter)
+            -- Check if we should teleport
             if State.dungeonTeleportQueued and not State.arbiterPresent then
-                print("No Arbiter present, proceeding with dungeon teleport...")
                 handleDungeonTeleport()
                 break
             end
@@ -796,9 +855,7 @@ local function farmingLoop()
                 break
             end
             
-            -- Check if boss is completely gone (only check periodically)
             if checkBossCompletelyGone() and not State.arbiterPresent then
-                print("Boss completely gone from workspace, teleporting to dungeon...")
                 handleDungeonTeleport()
                 break
             end
@@ -808,7 +865,7 @@ local function farmingLoop()
                 lastRecoveryCheck = now
             end
             
-            -- ALWAYS attempt to fire, even if no target found (Arbiter might need special handling)
+            -- ALWAYS attempt to fire, even if no enemies found
             attemptFire()
         else
             State.currentTarget = nil
@@ -846,6 +903,8 @@ local function onCharacterAdded(character)
     State.arbiterPresent = false
     State.arbiterForceShoot = false
     State.dungeonTeleportQueued = false
+    State.forceKeepShooting = false
+    State.consecutiveNoTargetCount = 0
 end
 
 local function initialize()
@@ -908,6 +967,7 @@ return {
     EnableShooting = function()
         State.shootingEnabled = true
         State.shootingErrors = 0
+        State.forceKeepShooting = true -- Force shooting when re-enabled
     end,
     
     DisableShooting = function()
@@ -931,10 +991,6 @@ return {
             currentLives = tostring(livesValue.Value)
         end
         
-        local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
-        local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
-        local arbiter = workspace:FindFirstChild("The Arbiter")
-        
         return {
             BossSpawned = State.bossHasSpawned,
             BossSpawnConfirmed = State.bossSpawnConfirmed,
@@ -955,9 +1011,9 @@ return {
             TimeSinceLastShot = tick() - State.lastFireTime,
             ArbiterPresent = State.arbiterPresent,
             ArbiterForceShoot = State.arbiterForceShoot,
-            GilgameshInWorkspace = gilgamesh ~= nil,
-            UberBringerInWorkspace = uberBringer ~= nil,
-            ArbiterInWorkspace = arbiter ~= nil
+            ForceKeepShooting = State.forceKeepShooting,
+            ConsecutiveNoTargetCount = State.consecutiveNoTargetCount,
+            ToolEquipped = getValidTool() ~= nil
         }
     end,
     
@@ -972,6 +1028,12 @@ return {
         State.shootingErrors = 0
         State.lastFireTime = 0
         State.arbiterForceShoot = false
+        State.forceKeepShooting = true
+        State.consecutiveNoTargetCount = 0
         equipTool()
+    end,
+    
+    ForceEquip = function()
+        forceEquipCheck()
     end
 }
