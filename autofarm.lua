@@ -59,7 +59,10 @@ local State = {
     lastToolEquipTime = 0,
     toolEquipCooldown = 2,
     arbiterPresent = false,
-    arbiterForceShoot = false
+    arbiterForceShoot = false,
+    dungeonTeleportQueued = false, -- NEW: Track if dungeon teleport is queued
+    lastArbiterCheck = 0,
+    arbiterCheckInterval = 1
 }
 
 local cache = {
@@ -149,11 +152,14 @@ local function checkLives()
         
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
+            State.dungeonTeleportQueued = true -- Queue dungeon teleport
+            print("1 life remaining, queuing dungeon teleport...")
             return true
         end
         
         if livesNumber > 1 then
             State.livesChecked = false
+            State.dungeonTeleportQueued = false -- Reset if lives restored
         end
     end
     
@@ -317,12 +323,7 @@ local function findEnemies()
     end
     
     State.arbiterPresent = hasArbiter
-    
-    if #priorityEnemies > 0 then
-        return priorityEnemies
-    end
-    
-    return enemies
+    return priorityEnemies, enemies, hasArbiter
 end
 
 local function selectTarget()
@@ -330,63 +331,61 @@ local function selectTarget()
         return nil
     end
     
-    local enemies = findEnemies()
+    local priorityEnemies, regularEnemies, hasArbiter = findEnemies()
     
-    if #enemies == 0 then
+    -- If Arbiter is present, force target it
+    if hasArbiter then
+        State.arbiterForceShoot = true
+        -- Find the Arbiter in priority enemies
+        for _, enemy in ipairs(priorityEnemies) do
+            if enemy.IsArbiter then
+                return enemy
+            end
+        end
+        -- If not found in priority, check regular (shouldn't happen)
+        for _, enemy in ipairs(regularEnemies) do
+            if enemy.IsArbiter then
+                return enemy
+            end
+        end
+    else
         State.arbiterForceShoot = false
-        return nil
     end
     
-    if State.currentTarget and State.currentTarget.IsArbiter then
-        local arbiterModel = State.currentTarget.Model
-        if arbiterModel and arbiterModel.Parent then
-            local humanoid = arbiterModel:FindFirstChildOfClass("Humanoid")
-            if humanoid and humanoid.Health > 0 then
-                State.arbiterForceShoot = true
-                return State.currentTarget
-            else
-                State.arbiterForceShoot = false
+    -- Use priority enemies if available
+    if #priorityEnemies > 0 then
+        return priorityEnemies[1]
+    end
+    
+    -- Use regular enemies if available
+    if #regularEnemies > 0 then
+        -- Return closest enemy
+        local character = player.Character
+        if not character then 
+            return regularEnemies[1] 
+        end
+        
+        local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+        if not humanoidRootPart then 
+            return regularEnemies[1] 
+        end
+        
+        local playerPos = humanoidRootPart.Position
+        local closestEnemy = regularEnemies[1]
+        local closestDistance = math.huge
+        
+        for _, enemy in ipairs(regularEnemies) do
+            local distance = (enemy.Position - playerPos).Magnitude
+            if distance < closestDistance then
+                closestDistance = distance
+                closestEnemy = enemy
             end
-        else
-            State.arbiterForceShoot = false
         end
+        
+        return closestEnemy
     end
     
-    if State.currentTarget then
-        local targetModel = State.currentTarget.Model
-        if targetModel and targetModel.Parent then
-            local humanoid = targetModel:FindFirstChildOfClass("Humanoid")
-            if humanoid and humanoid.Health > 0 then
-                if State.currentTarget.IsPriority then
-                    return State.currentTarget
-                end
-            end
-        end
-    end
-    
-    local character = player.Character
-    if not character then 
-        return enemies[1] 
-    end
-    
-    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-    if not humanoidRootPart then 
-        return enemies[1] 
-    end
-    
-    local playerPos = humanoidRootPart.Position
-    local closestEnemy = enemies[1]
-    local closestDistance = math.huge
-    
-    for _, enemy in ipairs(enemies) do
-        local distance = (enemy.Position - playerPos).Magnitude
-        if distance < closestDistance then
-            closestDistance = distance
-            closestEnemy = enemy
-        end
-    end
-    
-    return closestEnemy
+    return nil
 end
 
 local function getValidTool()
@@ -484,15 +483,12 @@ local function attemptFire()
         return
     end
     
-    if not targetResult and not State.arbiterForceShoot then
+    -- If we have dungeon teleport queued and Arbiter is present, keep shooting
+    if State.dungeonTeleportQueued and State.arbiterPresent then
+        -- Don't return, keep shooting Arbiter even with 1 life
+    elseif not targetResult and not State.arbiterForceShoot then
         return
     end
-    
-    if State.arbiterForceShoot and (not targetResult or not targetResult.IsArbiter) then
-        return
-    end
-    
-    local isArbiter = State.arbiterForceShoot or (targetResult and targetResult.IsArbiter)
     
     local toolData
     local toolSuccess, toolResult = pcall(function()
@@ -539,15 +535,12 @@ local function attemptFire()
     State.lastFireTime = now
     
     local targetPos
-    if isArbiter then
+    if State.arbiterForceShoot and targetResult and targetResult.IsArbiter then
         targetPos = ARBITER_TARGET_POSITION
+    elseif targetResult and targetResult.TargetPart then
+        targetPos = targetResult.TargetPart.Position
     else
-        local targetPart = targetResult and targetResult.TargetPart
-        if targetPart then
-            targetPos = targetPart.Position
-        else
-            return
-        end
+        return
     end
     
     local camera = workspace.CurrentCamera
@@ -568,8 +561,9 @@ local function attemptFire()
     if not fireSuccess then
         State.shootingErrors = State.shootingErrors + 1
         
-        if isArbiter then
+        if State.arbiterForceShoot then
             task.wait(0.1)
+            -- Try shooting directly at the position if Arbiter shooting fails
             pcall(function()
                 toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
             end)
@@ -697,6 +691,7 @@ local function handleDungeonTeleport()
         State.specialMode = false
         State.isRunning = true
         State.livesChecked = false
+        State.dungeonTeleportQueued = false -- Reset queue
         State.shootingEnabled = true
         State.arbiterForceShoot = false
     end
@@ -737,11 +732,33 @@ local function shootingRecoveryCheck()
     end
 end
 
+local function checkArbiterStatus()
+    local now = tick()
+    if now - State.lastArbiterCheck < State.arbiterCheckInterval then
+        return
+    end
+    
+    State.lastArbiterCheck = now
+    local arbiter = workspace:FindFirstChild("The Arbiter")
+    
+    if arbiter then
+        local humanoid = arbiter:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.Health > 0 then
+            -- Arbiter is alive and present
+            return true
+        end
+    end
+    
+    return false
+end
+
 local function farmingLoop()
     local lastBossCheck = 0
     local bossCheckInterval = 2
     local lastRecoveryCheck = 0
     local recoveryCheckInterval = 5
+    local lastArbiterActiveCheck = 0
+    local arbiterActiveCheckInterval = 1
     
     while State.isRunning and not State.bossCompleted do
         local now = tick()
@@ -749,7 +766,12 @@ local function farmingLoop()
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
-            if checkLives() then
+            -- Check lives but don't immediately teleport if Arbiter is active
+            checkLives()
+            
+            -- Check if we should teleport (only if no Arbiter or Arbiter is dead)
+            if State.dungeonTeleportQueued and not State.arbiterPresent then
+                print("No Arbiter present, proceeding with dungeon teleport...")
                 handleDungeonTeleport()
                 break
             end
@@ -768,6 +790,16 @@ local function farmingLoop()
                 end
                 
                 lastBossCheck = now
+            end
+            
+            -- Check Arbiter status more frequently
+            if now - lastArbiterActiveCheck > arbiterActiveCheckInterval then
+                local arbiterActive = checkArbiterStatus()
+                if not arbiterActive then
+                    State.arbiterPresent = false
+                    State.arbiterForceShoot = false
+                end
+                lastArbiterActiveCheck = now
             end
             
             if now - lastRecoveryCheck > recoveryCheckInterval then
@@ -811,6 +843,7 @@ local function onCharacterAdded(character)
     State.shootingErrors = 0
     State.arbiterPresent = false
     State.arbiterForceShoot = false
+    State.dungeonTeleportQueued = false -- Reset on character respawn
 end
 
 local function initialize()
@@ -896,12 +929,15 @@ return {
             currentLives = tostring(livesValue.Value)
         end
         
+        local arbiterActive = checkArbiterStatus()
+        
         return {
             BossSpawned = State.bossHasSpawned,
             BossCompleted = State.bossCompleted,
             CurrentTarget = State.currentTarget and State.currentTarget.Name or "None",
             LivesValue = currentLives,
             LivesTriggered = State.livesChecked,
+            DungeonTeleportQueued = State.dungeonTeleportQueued,
             AutoTeleportTriggered = State.autoTeleportTriggered,
             CurrentPlaceId = game.PlaceId,
             PlayerAlive = State.playerAlive,
@@ -913,7 +949,8 @@ return {
             LastShotTime = State.lastFireTime,
             TimeSinceLastShot = tick() - State.lastFireTime,
             ArbiterPresent = State.arbiterPresent,
-            ArbiterForceShoot = State.arbiterForceShoot
+            ArbiterForceShoot = State.arbiterForceShoot,
+            ArbiterActive = arbiterActive
         }
     end,
     
