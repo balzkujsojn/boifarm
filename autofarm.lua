@@ -60,7 +60,7 @@ local State = {
     toolEquipCooldown = 2,
     arbiterPresent = false,
     arbiterForceShoot = false,
-    dungeonTeleportQueued = false, -- NEW: Track if dungeon teleport is queued
+    dungeonTeleportQueued = false,
     lastArbiterCheck = 0,
     arbiterCheckInterval = 1
 }
@@ -72,6 +72,29 @@ local cache = {
     lastPriorityCheck = 0
 }
 
+-- Helper function to check if tool is equipped
+local function isToolEquipped()
+    local character = player.Character
+    if not character then return false end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return false end
+    
+    -- Check EquippedTool property
+    local equipped = humanoid.EquippedTool
+    if equipped and equipped.Name == CONFIG.TOOL_NAME then
+        return true
+    end
+    
+    -- Alternative check: look for tool in character
+    local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
+    if tool then
+        return true
+    end
+    
+    return false
+end
+
 local function sendSkipCommands()
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
     if State.skipAllSaid and State.skipSaid then return end
@@ -79,7 +102,6 @@ local function sendSkipCommands()
     task.spawn(function()
         if not State.skipAllSaid then
             task.wait(0.5)
-            -- Use new command system for /skipall
             local success = pcall(function()
                 local args = {
                     [1] = "skipall"
@@ -96,7 +118,6 @@ local function sendSkipCommands()
         task.wait(1)
         
         if not State.skipSaid then
-            -- Use new command system for /skip
             local success = pcall(function()
                 local args = {
                     [1] = "skip"
@@ -152,14 +173,14 @@ local function checkLives()
         
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
-            State.dungeonTeleportQueued = true -- Queue dungeon teleport
+            State.dungeonTeleportQueued = true
             print("1 life remaining, queuing dungeon teleport...")
             return true
         end
         
         if livesNumber > 1 then
             State.livesChecked = false
-            State.dungeonTeleportQueued = false -- Reset if lives restored
+            State.dungeonTeleportQueued = false
         end
     end
     
@@ -333,16 +354,13 @@ local function selectTarget()
     
     local priorityEnemies, regularEnemies, hasArbiter = findEnemies()
     
-    -- If Arbiter is present, force target it
     if hasArbiter then
         State.arbiterForceShoot = true
-        -- Find the Arbiter in priority enemies
         for _, enemy in ipairs(priorityEnemies) do
             if enemy.IsArbiter then
                 return enemy
             end
         end
-        -- If not found in priority, check regular (shouldn't happen)
         for _, enemy in ipairs(regularEnemies) do
             if enemy.IsArbiter then
                 return enemy
@@ -352,14 +370,11 @@ local function selectTarget()
         State.arbiterForceShoot = false
     end
     
-    -- Use priority enemies if available
     if #priorityEnemies > 0 then
         return priorityEnemies[1]
     end
     
-    -- Use regular enemies if available
     if #regularEnemies > 0 then
-        -- Return closest enemy
         local character = player.Character
         if not character then 
             return regularEnemies[1] 
@@ -398,6 +413,7 @@ local function getValidTool()
         return nil 
     end
     
+    -- First check if tool is already in character
     local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
     if not tool then 
         return nil 
@@ -437,22 +453,46 @@ local function equipTool()
         return equipTool()
     end
     
-    local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
-    if tool then
-        humanoid:EquipTool(tool)
+    -- Check if tool is already equipped
+    if isToolEquipped() then
         State.lastToolEquipTime = now
         return true
     end
     
+    local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
+    if tool then
+        -- Tool is in character but not equipped
+        local success, err = pcall(function()
+            humanoid:EquipTool(tool)
+        end)
+        
+        if success then
+            State.lastToolEquipTime = now
+            return true
+        else
+            warn("Failed to equip tool from character:", err)
+            return false
+        end
+    end
+    
+    -- Tool not in character, check backpack
     local backpack = player:FindFirstChild("Backpack")
     if backpack then
         tool = backpack:FindFirstChild(CONFIG.TOOL_NAME)
         if tool then
-            tool.Parent = character
-            task.wait(0.1)
-            humanoid:EquipTool(tool)
-            State.lastToolEquipTime = now
-            return true
+            local success, err = pcall(function()
+                tool.Parent = character
+                task.wait(0.1)
+                humanoid:EquipTool(tool)
+            end)
+            
+            if success then
+                State.lastToolEquipTime = now
+                return true
+            else
+                warn("Failed to equip tool from backpack:", err)
+                return false
+            end
         end
     end
     
@@ -483,9 +523,8 @@ local function attemptFire()
         return
     end
     
-    -- If we have dungeon teleport queued and Arbiter is present, keep shooting
     if State.dungeonTeleportQueued and State.arbiterPresent then
-        -- Don't return, keep shooting Arbiter even with 1 life
+        -- Keep shooting Arbiter even with 1 life
     elseif not targetResult and not State.arbiterForceShoot then
         return
     end
@@ -563,7 +602,6 @@ local function attemptFire()
         
         if State.arbiterForceShoot then
             task.wait(0.1)
-            -- Try shooting directly at the position if Arbiter shooting fails
             pcall(function()
                 toolData.Remote:InvokeServer("fire", {targetPos, targetPos, State.chargeValue})
             end)
@@ -691,7 +729,7 @@ local function handleDungeonTeleport()
         State.specialMode = false
         State.isRunning = true
         State.livesChecked = false
-        State.dungeonTeleportQueued = false -- Reset queue
+        State.dungeonTeleportQueued = false
         State.shootingEnabled = true
         State.arbiterForceShoot = false
     end
@@ -744,12 +782,47 @@ local function checkArbiterStatus()
     if arbiter then
         local humanoid = arbiter:FindFirstChildOfClass("Humanoid")
         if humanoid and humanoid.Health > 0 then
-            -- Arbiter is alive and present
             return true
         end
     end
     
     return false
+end
+
+-- Fixed forceEquipCheck function that was causing the error
+local function forceEquipCheck()
+    if not State.playerAlive then return end
+    
+    local character = player.Character
+    if not character then return end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    -- Fixed: Using correct property instead of non-existent GetEquippedTool
+    local equippedTool = humanoid.EquippedTool
+    
+    if not equippedTool or equippedTool.Name ~= CONFIG.TOOL_NAME then
+        -- Tool is not equipped, try to equip it
+        local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
+        if not tool then
+            -- Check backpack
+            local backpack = player:FindFirstChild("Backpack")
+            if backpack then
+                tool = backpack:FindFirstChild(CONFIG.TOOL_NAME)
+                if tool then
+                    tool.Parent = character
+                    task.wait(0.1)
+                end
+            end
+        end
+        
+        if tool then
+            pcall(function()
+                humanoid:EquipTool(tool)
+            end)
+        end
+    end
 end
 
 local function farmingLoop()
@@ -759,6 +832,8 @@ local function farmingLoop()
     local recoveryCheckInterval = 5
     local lastArbiterActiveCheck = 0
     local arbiterActiveCheckInterval = 1
+    local lastForceEquipCheck = 0
+    local forceEquipCheckInterval = 1
     
     while State.isRunning and not State.bossCompleted do
         local now = tick()
@@ -766,10 +841,8 @@ local function farmingLoop()
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
-            -- Check lives but don't immediately teleport if Arbiter is active
             checkLives()
             
-            -- Check if we should teleport (only if no Arbiter or Arbiter is dead)
             if State.dungeonTeleportQueued and not State.arbiterPresent then
                 print("No Arbiter present, proceeding with dungeon teleport...")
                 handleDungeonTeleport()
@@ -792,7 +865,6 @@ local function farmingLoop()
                 lastBossCheck = now
             end
             
-            -- Check Arbiter status more frequently
             if now - lastArbiterActiveCheck > arbiterActiveCheckInterval then
                 local arbiterActive = checkArbiterStatus()
                 if not arbiterActive then
@@ -805,6 +877,12 @@ local function farmingLoop()
             if now - lastRecoveryCheck > recoveryCheckInterval then
                 shootingRecoveryCheck()
                 lastRecoveryCheck = now
+            end
+            
+            -- Periodically force equip check to ensure tool is equipped
+            if now - lastForceEquipCheck > forceEquipCheckInterval then
+                forceEquipCheck()
+                lastForceEquipCheck = now
             end
             
             attemptFire()
@@ -843,7 +921,7 @@ local function onCharacterAdded(character)
     State.shootingErrors = 0
     State.arbiterPresent = false
     State.arbiterForceShoot = false
-    State.dungeonTeleportQueued = false -- Reset on character respawn
+    State.dungeonTeleportQueued = false
 end
 
 local function initialize()
@@ -950,7 +1028,8 @@ return {
             TimeSinceLastShot = tick() - State.lastFireTime,
             ArbiterPresent = State.arbiterPresent,
             ArbiterForceShoot = State.arbiterForceShoot,
-            ArbiterActive = arbiterActive
+            ArbiterActive = arbiterActive,
+            ToolEquipped = isToolEquipped()
         }
     end,
     
@@ -966,5 +1045,7 @@ return {
         State.lastFireTime = 0
         State.arbiterForceShoot = false
         equipTool()
-    end
+    end,
+    
+    ForceEquipCheck = forceEquipCheck
 }
