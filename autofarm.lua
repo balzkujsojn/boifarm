@@ -1,5 +1,4 @@
 repeat task.wait() until game:IsLoaded()
-print("latest version")
 local Players = game:GetService("Players")
 repeat task.wait() until Players.LocalPlayer
 local player = Players.LocalPlayer
@@ -1037,3 +1036,4 @@ return {
         forceEquipCheck()
     end
 }
+
