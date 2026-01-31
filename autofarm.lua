@@ -60,9 +60,12 @@ local State = {
     toolEquipCooldown = 2,
     arbiterPresent = false,
     arbiterForceShoot = false,
-    dungeonTeleportQueued = false, -- NEW: Track if dungeon teleport is queued
+    dungeonTeleportQueued = false,
     lastArbiterCheck = 0,
-    arbiterCheckInterval = 1
+    arbiterCheckInterval = 1,
+    bossSpawnConfirmed = false, -- NEW: Track if boss was confirmed to spawn
+    lastBossCheck = 0,
+    bossCheckCooldown = 5 -- NEW: Don't check boss status too frequently
 }
 
 local cache = {
@@ -152,14 +155,14 @@ local function checkLives()
         
         if livesNumber == 1 and not State.livesChecked then
             State.livesChecked = true
-            State.dungeonTeleportQueued = true -- Queue dungeon teleport
+            State.dungeonTeleportQueued = true
             print("1 life remaining, queuing dungeon teleport...")
             return true
         end
         
         if livesNumber > 1 then
             State.livesChecked = false
-            State.dungeonTeleportQueued = false -- Reset if lives restored
+            State.dungeonTeleportQueued = false
         end
     end
     
@@ -260,7 +263,7 @@ end
 
 local function findEnemies()
     if not State.playerAlive or not State.shootingEnabled then 
-        return {}
+        return {}, {}, false
     end
     
     local now = tick()
@@ -273,9 +276,19 @@ local function findEnemies()
     local enemies = {}
     local priorityEnemies = {}
     local hasArbiter = false
+    local hasBoss = false
     
     for _, model in ipairs(cache.workspaceChildren) do
         if model:IsA("Model") and model.Parent == workspace then
+            local enemyName = model.Name
+            
+            -- Check if this is a boss
+            if enemyName == "Gilgamesh, the Consumer of Reality" or 
+               enemyName == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
+                hasBoss = true
+                State.bossSpawnConfirmed = true -- Boss was confirmed to spawn
+            end
+            
             local humanoid = model:FindFirstChildOfClass("Humanoid")
             
             if humanoid and humanoid.Health > 0 then
@@ -295,20 +308,17 @@ local function findEnemies()
                             Humanoid = humanoid,
                             TargetPart = targetPart,
                             Position = targetPart.Position,
-                            Name = model.Name,
-                            IsPriority = PRIORITY_ENEMIES[model.Name] == true,
+                            Name = enemyName,
+                            IsPriority = PRIORITY_ENEMIES[enemyName] == true,
                             LastSeen = now,
-                            IsArbiter = model.Name == "The Arbiter"
+                            IsArbiter = enemyName == "The Arbiter",
+                            IsBoss = enemyName == "Gilgamesh, the Consumer of Reality" or 
+                                    enemyName == "The Supreme Uber Bringer of Light and Space Time Annihilation"
                         }
                         
                         if enemyData.IsArbiter then
                             hasArbiter = true
                             enemyData.IsPriority = true
-                        end
-                        
-                        if model.Name == "Gilgamesh, the Consumer of Reality" or 
-                           model.Name == "The Supreme Uber Bringer of Light and Space Time Annihilation" then
-                            State.bossHasSpawned = true
                         end
                         
                         if enemyData.IsPriority then
@@ -323,6 +333,15 @@ local function findEnemies()
     end
     
     State.arbiterPresent = hasArbiter
+    
+    -- Update boss status based on actual presence
+    if hasBoss then
+        State.bossHasSpawned = true
+    elseif State.bossSpawnConfirmed and not hasArbiter then
+        -- Boss was confirmed to spawn, is now gone, and Arbiter isn't present
+        State.bossHasSpawned = false
+    end
+    
     return priorityEnemies, enemies, hasArbiter
 end
 
@@ -333,17 +352,10 @@ local function selectTarget()
     
     local priorityEnemies, regularEnemies, hasArbiter = findEnemies()
     
-    -- If Arbiter is present, force target it
+    -- Always prioritize Arbiter if present
     if hasArbiter then
         State.arbiterForceShoot = true
-        -- Find the Arbiter in priority enemies
         for _, enemy in ipairs(priorityEnemies) do
-            if enemy.IsArbiter then
-                return enemy
-            end
-        end
-        -- If not found in priority, check regular (shouldn't happen)
-        for _, enemy in ipairs(regularEnemies) do
             if enemy.IsArbiter then
                 return enemy
             end
@@ -359,7 +371,6 @@ local function selectTarget()
     
     -- Use regular enemies if available
     if #regularEnemies > 0 then
-        -- Return closest enemy
         local character = player.Character
         if not character then 
             return regularEnemies[1] 
@@ -483,9 +494,9 @@ local function attemptFire()
         return
     end
     
-    -- If we have dungeon teleport queued and Arbiter is present, keep shooting
-    if State.dungeonTeleportQueued and State.arbiterPresent then
-        -- Don't return, keep shooting Arbiter even with 1 life
+    -- Always shoot if Arbiter is present, regardless of other conditions
+    if State.arbiterPresent then
+        -- Don't return, keep shooting Arbiter
     elseif not targetResult and not State.arbiterForceShoot then
         return
     end
@@ -539,6 +550,9 @@ local function attemptFire()
         targetPos = ARBITER_TARGET_POSITION
     elseif targetResult and targetResult.TargetPart then
         targetPos = targetResult.TargetPart.Position
+    elseif State.arbiterPresent then
+        -- If Arbiter is present but we couldn't get target, shoot at Arbiter position anyway
+        targetPos = ARBITER_TARGET_POSITION
     else
         return
     end
@@ -561,7 +575,7 @@ local function attemptFire()
     if not fireSuccess then
         State.shootingErrors = State.shootingErrors + 1
         
-        if State.arbiterForceShoot then
+        if State.arbiterPresent then
             task.wait(0.1)
             -- Try shooting directly at the position if Arbiter shooting fails
             pcall(function()
@@ -598,6 +612,30 @@ local function checkTeleportSuccess()
     end
     
     return true
+end
+
+local function checkBossCompletelyGone()
+    local now = tick()
+    if now - State.lastBossCheck < State.bossCheckCooldown then
+        return false
+    end
+    
+    State.lastBossCheck = now
+    
+    -- Check if bosses are completely gone from workspace
+    local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
+    local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
+    local arbiter = workspace:FindFirstChild("The Arbiter")
+    
+    -- Boss is only considered completely gone if:
+    -- 1. Boss was confirmed to spawn (State.bossSpawnConfirmed = true)
+    -- 2. Boss model is not in workspace
+    -- 3. Arbiter is not in workspace
+    if State.bossSpawnConfirmed and not gilgamesh and not uberBringer and not arbiter then
+        return true
+    end
+    
+    return false
 end
 
 local function attemptDungeonTeleport()
@@ -691,33 +729,9 @@ local function handleDungeonTeleport()
         State.specialMode = false
         State.isRunning = true
         State.livesChecked = false
-        State.dungeonTeleportQueued = false -- Reset queue
+        State.dungeonTeleportQueued = false
         State.shootingEnabled = true
         State.arbiterForceShoot = false
-    end
-end
-
-local function checkBossStatus()
-    local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
-    local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
-    
-    local boss = gilgamesh or uberBringer
-    
-    if boss then
-        State.bossHasSpawned = true
-        
-        local humanoid = boss:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            if humanoid.Health <= 0 then
-                return "dead"
-            else
-                return "alive"
-            end
-        else
-            return "spawning"
-        end
-    else
-        return "not_spawned"
     end
 end
 
@@ -735,7 +749,7 @@ end
 local function checkArbiterStatus()
     local now = tick()
     if now - State.lastArbiterCheck < State.arbiterCheckInterval then
-        return
+        return State.arbiterPresent
     end
     
     State.lastArbiterCheck = now
@@ -744,21 +758,19 @@ local function checkArbiterStatus()
     if arbiter then
         local humanoid = arbiter:FindFirstChildOfClass("Humanoid")
         if humanoid and humanoid.Health > 0 then
-            -- Arbiter is alive and present
+            State.arbiterPresent = true
             return true
         end
     end
     
+    State.arbiterPresent = false
+    State.arbiterForceShoot = false
     return false
 end
 
 local function farmingLoop()
-    local lastBossCheck = 0
-    local bossCheckInterval = 2
     local lastRecoveryCheck = 0
     local recoveryCheckInterval = 5
-    local lastArbiterActiveCheck = 0
-    local arbiterActiveCheckInterval = 1
     
     while State.isRunning and not State.bossCompleted do
         local now = tick()
@@ -766,10 +778,13 @@ local function farmingLoop()
         State.playerAlive = isPlayerAlive()
         
         if State.playerAlive then
-            -- Check lives but don't immediately teleport if Arbiter is active
+            -- Check lives
             checkLives()
             
-            -- Check if we should teleport (only if no Arbiter or Arbiter is dead)
+            -- Check Arbiter status
+            checkArbiterStatus()
+            
+            -- Check if we should teleport (only if no Arbiter)
             if State.dungeonTeleportQueued and not State.arbiterPresent then
                 print("No Arbiter present, proceeding with dungeon teleport...")
                 handleDungeonTeleport()
@@ -781,25 +796,11 @@ local function farmingLoop()
                 break
             end
             
-            if now - lastBossCheck > bossCheckInterval then
-                local bossStatus = checkBossStatus()
-                
-                if State.bossHasSpawned and bossStatus == "dead" and not State.bossCompleted then
-                    handleDungeonTeleport()
-                    break
-                end
-                
-                lastBossCheck = now
-            end
-            
-            -- Check Arbiter status more frequently
-            if now - lastArbiterActiveCheck > arbiterActiveCheckInterval then
-                local arbiterActive = checkArbiterStatus()
-                if not arbiterActive then
-                    State.arbiterPresent = false
-                    State.arbiterForceShoot = false
-                end
-                lastArbiterActiveCheck = now
+            -- Check if boss is completely gone (only check periodically)
+            if checkBossCompletelyGone() and not State.arbiterPresent then
+                print("Boss completely gone from workspace, teleporting to dungeon...")
+                handleDungeonTeleport()
+                break
             end
             
             if now - lastRecoveryCheck > recoveryCheckInterval then
@@ -807,6 +808,7 @@ local function farmingLoop()
                 lastRecoveryCheck = now
             end
             
+            -- ALWAYS attempt to fire, even if no target found (Arbiter might need special handling)
             attemptFire()
         else
             State.currentTarget = nil
@@ -843,7 +845,7 @@ local function onCharacterAdded(character)
     State.shootingErrors = 0
     State.arbiterPresent = false
     State.arbiterForceShoot = false
-    State.dungeonTeleportQueued = false -- Reset on character respawn
+    State.dungeonTeleportQueued = false
 end
 
 local function initialize()
@@ -929,10 +931,13 @@ return {
             currentLives = tostring(livesValue.Value)
         end
         
-        local arbiterActive = checkArbiterStatus()
+        local gilgamesh = workspace:FindFirstChild("Gilgamesh, the Consumer of Reality")
+        local uberBringer = workspace:FindFirstChild("The Supreme Uber Bringer of Light and Space Time Annihilation")
+        local arbiter = workspace:FindFirstChild("The Arbiter")
         
         return {
             BossSpawned = State.bossHasSpawned,
+            BossSpawnConfirmed = State.bossSpawnConfirmed,
             BossCompleted = State.bossCompleted,
             CurrentTarget = State.currentTarget and State.currentTarget.Name or "None",
             LivesValue = currentLives,
@@ -950,7 +955,9 @@ return {
             TimeSinceLastShot = tick() - State.lastFireTime,
             ArbiterPresent = State.arbiterPresent,
             ArbiterForceShoot = State.arbiterForceShoot,
-            ArbiterActive = arbiterActive
+            GilgameshInWorkspace = gilgamesh ~= nil,
+            UberBringerInWorkspace = uberBringer ~= nil,
+            ArbiterInWorkspace = arbiter ~= nil
         }
     end,
     
