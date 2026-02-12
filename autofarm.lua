@@ -49,7 +49,6 @@ local State = {
     autoTeleportTriggered = false,
     teleportAttempts = 0,
     maxTeleportAttempts = 3,
-    teleportInProgress = false,
     shootingEnabled = true,
     shootingErrors = 0,
     maxShootingErrors = 10,
@@ -57,8 +56,7 @@ local State = {
     toolEquipCooldown = 2,
     arbiterPresent = false,
     arbiterForceShoot = false,
-    arbiterSpawned = false,
-    teleportedToArbiter = false
+    hasTeleportedToArbiterThisSpawn = false
 }
 
 local cache = {
@@ -117,7 +115,6 @@ local function teleportToPosition()
 end
 
 local function teleportToArbiterPosition()
-    if State.teleportedToArbiter then return end
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
    
     local char = player.Character
@@ -125,8 +122,6 @@ local function teleportToArbiterPosition()
    
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-   
-    State.teleportedToArbiter = true
    
     local tweenInfo = TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     local tween = TweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(ARBITER_TARGET_POSITION)})
@@ -307,8 +302,8 @@ local function findEnemies()
     end
    
     State.arbiterPresent = hasArbiter
-    if hasArbiter and not State.arbiterSpawned then
-        State.arbiterSpawned = true
+    if hasArbiter and not State.hasTeleportedToArbiterThisSpawn then
+        State.hasTeleportedToArbiterThisSpawn = true
         task.spawn(teleportToArbiterPosition)
     end
    
@@ -704,6 +699,7 @@ local function farmingLoop()
 end
 
 local function onCharacterAdded(character)
+    State.hasTeleportedToArbiterThisSpawn = false
     task.wait(2)
    
     if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
