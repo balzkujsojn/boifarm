@@ -13,7 +13,6 @@ local CONFIG = {
 }
 local PRIORITY_ENEMIES = {
     ["The Arbiter"] = true,
-    ["Alrasid, Archbishop of the Equinox"] = true,
     ["Gilgamesh, the Consumer of Reality"] = true,
     ["The Supreme Uber Bringer of Light and Space Time Annihilation"] = true,
     ["Controller Turret"] = true
@@ -25,7 +24,7 @@ local TELEPORT_POSITION = Vector3.new(-21, 103, -469)
 local SPECIFIC_PLACE_ID = 96516249626799
 local AUTOTELEPORT_PLACE_ID = 8811271345
 local ARBITER_BASE_POSITION = Vector3.new(2170, 14, 1554)
-local ARBITER_PLATFORM_OFFSET = Vector3.new(2170, 214, 1554)
+local ARBITER_PLATFORM_OFFSET = Vector3.new(2170, 14, 2054)
 local ARBITER_PLATFORM_SIZE = Vector3.new(10, 2, 10)
 local ARBITER_PLATFORM_NAME = "ArbiterTempPlatform"
 local State = {
@@ -262,8 +261,7 @@ local function findEnemies()
                             Name = characterName,
                             IsPriority = isPriority,
                             LastSeen = now,
-                            IsArbiter = characterName == "The Arbiter",
-                            IsAlrasid = characterName == "Alrasid, Archbishop of the Equinox"
+                            IsArbiter = characterName == "The Arbiter"
                         }
                       
                         if enemyData.IsArbiter then
@@ -309,40 +307,41 @@ local function selectTarget()
     local enemies = findEnemies()
     if #enemies == 0 then
         if State.arbiterForceShoot then
+            -- Safety: keep forcing Arbiter logic even if list empty this frame
             return {IsArbiter = true, Position = ARBITER_BASE_POSITION}
         end
         State.arbiterForceShoot = false
         return nil
     end
   
-    local priorityEnemy = nil
+    local arbiterEnemy = nil
     for _, enemy in ipairs(enemies) do
-        if enemy.IsArbiter or enemy.IsAlrasid then
-            priorityEnemy = enemy
+        if enemy.IsArbiter then
+            arbiterEnemy = enemy
             break
         end
     end
-    if priorityEnemy then
-        State.currentTarget = priorityEnemy
-        State.arbiterForceShoot = priorityEnemy.IsArbiter
+    if arbiterEnemy then
+        State.currentTarget = arbiterEnemy
+        State.arbiterForceShoot = true
        
-        local targetPart = getTargetPart(priorityEnemy.Model)
+        local targetPart = getTargetPart(arbiterEnemy.Model)
         if targetPart then
-            priorityEnemy.TargetPart = targetPart
-            priorityEnemy.Position = targetPart.Position
+            arbiterEnemy.TargetPart = targetPart
+            arbiterEnemy.Position = targetPart.Position
         else
-            priorityEnemy.Position = priorityEnemy.IsArbiter and ARBITER_BASE_POSITION or priorityEnemy.Position
+            arbiterEnemy.Position = ARBITER_BASE_POSITION
         end
-        return priorityEnemy
+        return arbiterEnemy
     end
   
-    if State.currentTarget and (State.currentTarget.IsArbiter or State.currentTarget.IsAlrasid) then
-        local model = State.currentTarget.Model
-        if model and model.Parent then
-            local humanoid = model:FindFirstChildOfClass("Humanoid")
+    if State.currentTarget and State.currentTarget.IsArbiter then
+        local arbiterModel = State.currentTarget.Model
+        if arbiterModel and arbiterModel.Parent then
+            local humanoid = arbiterModel:FindFirstChildOfClass("Humanoid")
             if humanoid and humanoid.Health > 0 then
-                State.arbiterForceShoot = State.currentTarget.IsArbiter
-                local targetPart = getTargetPart(model)
+                State.arbiterForceShoot = true
+                local targetPart = getTargetPart(arbiterModel)
                 if targetPart then
                     State.currentTarget.TargetPart = targetPart
                     State.currentTarget.Position = targetPart.Position
@@ -463,6 +462,7 @@ local function attemptFire()
   
     if not targetResult then
         if not isArbiterForced then return end
+        -- Fallback for Arbiter: shoot anyway at fixed pos
         targetResult = {IsArbiter = true, Position = ARBITER_BASE_POSITION}
     end
   
@@ -667,7 +667,7 @@ local function farmingLoop()
             if now - lastRecoveryCheck > recoveryCheckInterval then
                 if State.shootingEnabled and State.isRunning and not State.bossCompleted and State.playerAlive then
                     if tick() - State.lastFireTime > 10 then
-                        State.shootingErrors = State.shootingErrors + 2
+                        State.shootingErrors = State.shootingErrors + 2  -- faster recovery trigger
                     end
                 end
                 lastRecoveryCheck = now
