@@ -74,12 +74,6 @@ local function createArbiterPlatform()
     part.Parent = workspace
     arbiterPlatform = part
 end
-local function destroyArbiterPlatform()
-    if arbiterPlatform and arbiterPlatform.Parent then
-        arbiterPlatform:Destroy()
-        arbiterPlatform = nil
-    end
-end
 local function sendSkipCommands()
     if game.PlaceId ~= SPECIFIC_PLACE_ID then return end
     if State.skipAllSaid and State.skipSaid then return end
