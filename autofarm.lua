@@ -24,7 +24,7 @@ local TELEPORT_POSITION = Vector3.new(-21, 103, -469)
 local SPECIFIC_PLACE_ID = 96516249626799
 local AUTOTELEPORT_PLACE_ID = 8811271345
 local ARBITER_BASE_POSITION = Vector3.new(2170, 14, 1554)
-local ARBITER_PLATFORM_OFFSET = Vector3.new(2170, 514, 1554)
+local ARBITER_PLATFORM_OFFSET = Vector3.new(2170, 214, 1554)
 local ARBITER_PLATFORM_SIZE = Vector3.new(10, 2, 10)
 local ARBITER_PLATFORM_NAME = "ArbiterTempPlatform"
 local State = {
@@ -52,12 +52,14 @@ local State = {
     toolEquipCooldown = 2,
     arbiterPresent = false,
     arbiterForceShoot = false,
-    hasTeleportedToArbiterThisSpawn = false
+    hasTeleportedToArbiterThisSpawn = false,
+    lastArbiterDetection = 0,
+    arbiterHealthCheckInterval = 0.2
 }
 local cache = {
     workspaceChildren = {},
     lastWorkspaceUpdate = 0,
-    workspaceUpdateInterval = 0.5
+    workspaceUpdateInterval = 0.3
 }
 local arbiterPlatform = nil
 local function createArbiterPlatform()
@@ -149,6 +151,12 @@ local function isPlayerAlive()
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
     if not humanoid then return false end
     return humanoid.Health > 0
+end
+local function isArbiterAlive()
+    local arbiterModel = workspace:FindFirstChild("The Arbiter")
+    if not arbiterModel then return false end
+    local humanoid = arbiterModel:FindFirstChildOfClass("Humanoid")
+    return humanoid and humanoid.Health > 0
 end
 local function useShield()
     local now = tick()
@@ -268,6 +276,7 @@ local function findEnemies()
                       
                         if enemyData.IsArbiter then
                             hasArbiter = true
+                            State.lastArbiterDetection = now
                             enemyData.IsPriority = true
                         end
                       
@@ -306,31 +315,30 @@ end
 local function selectTarget()
     if not State.playerAlive or not State.shootingEnabled then return nil end
   
+    local now = tick()
     local enemies = findEnemies()
-    if #enemies == 0 then
-        State.arbiterForceShoot = false
-        return nil
-    end
-  
-    local arbiterEnemy = nil
-    for _, enemy in ipairs(enemies) do
-        if enemy.IsArbiter then
-            arbiterEnemy = enemy
-            break
+    
+    if #enemies > 0 then
+        local arbiterEnemy = nil
+        for _, enemy in ipairs(enemies) do
+            if enemy.IsArbiter then
+                arbiterEnemy = enemy
+                break
+            end
         end
-    end
-    if arbiterEnemy then
-        State.currentTarget = arbiterEnemy
-        State.arbiterForceShoot = true
-       
-        local targetPart = getTargetPart(arbiterEnemy.Model)
-        if targetPart then
-            arbiterEnemy.TargetPart = targetPart
-            arbiterEnemy.Position = targetPart.Position
-        else
-            arbiterEnemy.Position = ARBITER_BASE_POSITION
+        if arbiterEnemy then
+            State.currentTarget = arbiterEnemy
+            State.arbiterForceShoot = true
+           
+            local targetPart = getTargetPart(arbiterEnemy.Model)
+            if targetPart then
+                arbiterEnemy.TargetPart = targetPart
+                arbiterEnemy.Position = targetPart.Position
+            else
+                arbiterEnemy.Position = ARBITER_BASE_POSITION
+            end
+            return arbiterEnemy
         end
-        return arbiterEnemy
     end
   
     if State.currentTarget and State.currentTarget.IsArbiter then
@@ -345,12 +353,18 @@ local function selectTarget()
                     State.currentTarget.Position = targetPart.Position
                 end
                 return State.currentTarget
-            else
-                State.arbiterForceShoot = false
             end
-        else
-            State.arbiterForceShoot = false
         end
+    end
+  
+    if now - State.lastArbiterDetection < 2.0 and isArbiterAlive() then
+        State.arbiterForceShoot = true
+        State.currentTarget = {
+            Name = "The Arbiter",
+            Position = ARBITER_BASE_POSITION,
+            IsArbiter = true
+        }
+        return State.currentTarget
     end
   
     if State.currentTarget then
@@ -365,25 +379,40 @@ local function selectTarget()
         end
     end
   
-    local character = player.Character
-    if not character then return enemies[1] end
-  
-    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-    if not humanoidRootPart then return enemies[1] end
-  
-    local playerPos = humanoidRootPart.Position
-    local closestEnemy = enemies[1]
-    local closestDistance = math.huge
-  
-    for _, enemy in ipairs(enemies) do
-        local distance = (enemy.Position - playerPos).Magnitude
-        if distance < closestDistance then
-            closestDistance = distance
-            closestEnemy = enemy
-        end
+    if #enemies == 0 and now - State.lastArbiterDetection < 3.0 then
+        State.arbiterForceShoot = true
+        State.currentTarget = {
+            Name = "The Arbiter (Fallback)",
+            Position = ARBITER_BASE_POSITION,
+            IsArbiter = true
+        }
+        return State.currentTarget
     end
   
-    return closestEnemy
+    if #enemies > 0 then
+        local character = player.Character
+        if not character then return enemies[1] end
+      
+        local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+        if not humanoidRootPart then return enemies[1] end
+      
+        local playerPos = humanoidRootPart.Position
+        local closestEnemy = enemies[1]
+        local closestDistance = math.huge
+      
+        for _, enemy in ipairs(enemies) do
+            local distance = (enemy.Position - playerPos).Magnitude
+            if distance < closestDistance then
+                closestDistance = distance
+                closestEnemy = enemy
+            end
+        end
+      
+        return closestEnemy
+    end
+  
+    State.arbiterForceShoot = false
+    return nil
 end
 local function getValidTool()
     if not State.playerAlive or not State.shootingEnabled then return nil end
@@ -676,6 +705,7 @@ local function farmingLoop()
 end
 local function onCharacterAdded(character)
     State.hasTeleportedToArbiterThisSpawn = false
+    State.lastArbiterDetection = 0
     task.wait(2)
   
     if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
@@ -775,7 +805,9 @@ return {
             TimeSinceLastShot = tick() - State.lastFireTime,
             ArbiterPresent = State.arbiterPresent,
             ArbiterForceShoot = State.arbiterForceShoot,
-            PlatformExists = (arbiterPlatform and arbiterPlatform.Parent) ~= nil
+            LastArbiterDetection = State.lastArbiterDetection,
+            PlatformExists = (arbiterPlatform and arbiterPlatform.Parent) ~= nil,
+            IsArbiterAlive = isArbiterAlive()
         }
     end,
     TriggerDungeon = function()
