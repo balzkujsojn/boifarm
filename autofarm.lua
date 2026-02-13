@@ -9,7 +9,8 @@ local TeleportService = game:GetService("TeleportService")
 local CONFIG = {
     FIRE_RATE = 0.05,
     TOOL_NAME = "Equinox Cannon",
-    REMOTE_NAME = "RemoteFunction"
+    REMOTE_NAME = "RemoteFunction",
+    toolEquipCooldown = 3
 }
 local PRIORITY_ENEMIES = {
     ["The Arbiter"] = true,
@@ -49,10 +50,10 @@ local State = {
     shootingErrors = 0,
     maxShootingErrors = 10,
     lastToolEquipTime = 0,
-    toolEquipCooldown = 2,
     arbiterPresent = false,
     arbiterForceShoot = false,
-    hasTeleportedToArbiterThisSpawn = false
+    hasTeleportedToArbiterThisSpawn = false,
+    arbiterSpawnTime = 0
 }
 local cache = {
     workspaceChildren = {},
@@ -61,7 +62,10 @@ local cache = {
 }
 local arbiterPlatform = nil
 local function createArbiterPlatform()
-    if arbiterPlatform and arbiterPlatform.Parent then return end
+    if arbiterPlatform then
+        arbiterPlatform:Destroy()
+        arbiterPlatform = nil
+    end
     local part = Instance.new("Part")
     part.Name = ARBITER_PLATFORM_NAME
     part.Size = ARBITER_PLATFORM_SIZE
@@ -70,7 +74,7 @@ local function createArbiterPlatform()
     part.CanCollide = true
     part.Transparency = 1
     part.Color = Color3.new(0, 0, 0)
-    part.Material = Enum.Material.ForceField
+    part.Material = Enum.Material.Plastic
     part.Parent = workspace
     arbiterPlatform = part
 end
@@ -233,6 +237,7 @@ local function findEnemies()
     local enemies = {}
     local priorityEnemies = {}
     local hasArbiter = false
+    local wasArbiterPresent = State.arbiterPresent
  
     for _, model in ipairs(cache.workspaceChildren) do
         if model:IsA("Model") and model.Parent == workspace then
@@ -279,11 +284,16 @@ local function findEnemies()
         end
     end
  
+    if hasArbiter and not wasArbiterPresent then
+        State.arbiterSpawnTime = tick()
+    end
+ 
     State.arbiterPresent = hasArbiter
  
     if hasArbiter then
         createArbiterPlatform()
-        if not State.hasTeleportedToArbiterThisSpawn then
+        local now = tick()
+        if State.arbiterSpawnTime > 0 and now - State.arbiterSpawnTime >= 2.5 and not State.hasTeleportedToArbiterThisSpawn then
             State.hasTeleportedToArbiterThisSpawn = true
             task.spawn(teleportToArbiterPlatform)
         end
@@ -377,6 +387,13 @@ local function selectTarget()
  
     return closestEnemy
 end
+local function hasTemperature()
+    local charModel = workspace:FindFirstChild(player.Name)
+    if not charModel then return false end
+    local stats = charModel:FindFirstChild("Stats")
+    if not stats then return false end
+    return stats:FindFirstChild("Temperature") ~= nil
+end
 local function getValidTool()
     if not State.playerAlive or not State.shootingEnabled then return nil end
  
@@ -399,7 +416,7 @@ local function equipTool()
     local now = tick()
     if not State.playerAlive then return false end
  
-    if now - State.lastToolEquipTime < State.toolEquipCooldown then return false end
+    if now - State.lastToolEquipTime < CONFIG.toolEquipCooldown then return false end
  
     local character = player.Character
     if not character then return false end
@@ -410,6 +427,7 @@ local function equipTool()
     local tool = character:FindFirstChild(CONFIG.TOOL_NAME)
     if tool then
         humanoid:EquipTool(tool)
+        task.wait(0.5)
         State.lastToolEquipTime = now
         return true
     end
@@ -421,6 +439,7 @@ local function equipTool()
             tool.Parent = character
             task.wait(0.1)
             humanoid:EquipTool(tool)
+            task.wait(0.5)
             State.lastToolEquipTime = now
             return true
         end
@@ -455,6 +474,12 @@ local function attemptFire()
         targetResult = {IsArbiter = true, Position = ARBITER_BASE_POSITION}
     end
  
+    local now = tick()
+    local isArbiterTarget = isArbiterForced or (targetResult and targetResult.IsArbiter)
+    if isArbiterTarget and State.arbiterSpawnTime > 0 and now - State.arbiterSpawnTime < 3 then
+        return
+    end
+ 
     if isArbiterForced and not targetResult.IsArbiter then return end
  
     local isArbiter = isArbiterForced or targetResult.IsArbiter
@@ -470,7 +495,15 @@ local function attemptFire()
         end
     end
  
-    local now = tick()
+    if not hasTemperature() then
+        equipTool()
+        task.wait(0.5)
+        if not hasTemperature() then
+            State.shootingErrors = State.shootingErrors + 1
+            return
+        end
+    end
+ 
     if now - State.lastFireTime < CONFIG.FIRE_RATE then return end
     State.lastFireTime = now
  
@@ -672,6 +705,7 @@ local function farmingLoop()
 end
 local function onCharacterAdded(character)
     State.hasTeleportedToArbiterThisSpawn = false
+    State.arbiterSpawnTime = 0
     task.wait(2)
  
     if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
