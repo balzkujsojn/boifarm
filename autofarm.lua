@@ -663,7 +663,7 @@ local function checkBossStatus()
                 if boss.Name == "Alrasid, Archbishop of the Equinox" and not State.alrasidDead then
                     State.alrasidDead = true
                     task.spawn(function()
-                        task.wait(10)
+                        task.wait(1)
                         if State.alrasidDead and not State.bossCompleted then
                             handleDungeonTeleport()
                         end
