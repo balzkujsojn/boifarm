@@ -575,7 +575,7 @@ local function attemptDungeonTeleport()
     State.isRunning = false
     State.shootingEnabled = false
 
-    task.wait(3)
+    task.wait(2)
 
     local tool = getValidTool()
     if tool and tool.Tool then
@@ -601,7 +601,7 @@ local function attemptDungeonTeleport()
         end
     end
 
-    task.wait(2)
+    task.wait(1)
 
     for attempt = 1, State.maxTeleportAttempts do
         State.teleportAttempts = attempt
@@ -615,11 +615,11 @@ local function attemptDungeonTeleport()
         end)
     
         if not createSuccess then
-            task.wait(2)
+            task.wait(1)
             continue
         end
     
-        task.wait(3)
+        task.wait(1)
     
         local joinSuccess = pcall(function()
             local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
