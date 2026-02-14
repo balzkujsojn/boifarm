@@ -64,10 +64,7 @@ local cache = {
 }
 local arbiterPlatform = nil
 local function createArbiterPlatform()
-    if arbiterPlatform then
-        arbiterPlatform:Destroy()
-        arbiterPlatform = nil
-    end
+    if arbiterPlatform and arbiterPlatform.Parent then return end
     local part = Instance.new("Part")
     part.Name = ARBITER_PLATFORM_NAME
     part.Size = ARBITER_PLATFORM_SIZE
@@ -229,9 +226,9 @@ local function findEnemies()
     if not State.playerAlive or not State.shootingEnabled then return {} end
 
     local now = tick()
-    local forceRefresh = State.arbiterPresent
+    local updateInterval = State.arbiterPresent and 0.15 or 0.5
 
-    if forceRefresh or (now - cache.lastWorkspaceUpdate > cache.workspaceUpdateInterval) then
+    if now - cache.lastWorkspaceUpdate > updateInterval then
         cache.workspaceChildren = workspace:GetChildren()
         cache.lastWorkspaceUpdate = now
     end
@@ -575,7 +572,7 @@ local function attemptDungeonTeleport()
     State.isRunning = false
     State.shootingEnabled = false
 
-    task.wait(2)
+    task.wait(3)
 
     local tool = getValidTool()
     if tool and tool.Tool then
@@ -601,7 +598,7 @@ local function attemptDungeonTeleport()
         end
     end
 
-    task.wait(1)
+    task.wait(2)
 
     for attempt = 1, State.maxTeleportAttempts do
         State.teleportAttempts = attempt
@@ -615,11 +612,11 @@ local function attemptDungeonTeleport()
         end)
     
         if not createSuccess then
-            task.wait(1)
+            task.wait(2)
             continue
         end
     
-        task.wait(1)
+        task.wait(3)
     
         local joinSuccess = pcall(function()
             local partyRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PartySystem"):WaitForChild("PartyFunction")
@@ -663,7 +660,7 @@ local function checkBossStatus()
                 if boss.Name == "Alrasid, Archbishop of the Equinox" and not State.alrasidDead then
                     State.alrasidDead = true
                     task.spawn(function()
-                        task.wait(1)
+                        task.wait(20)
                         if State.alrasidDead and not State.bossCompleted then
                             handleDungeonTeleport()
                         end
@@ -731,6 +728,11 @@ local function onCharacterAdded(character)
     State.arbiterSpawnTime = 0
     State.alrasidDead = false
     task.wait(2)
+
+    if arbiterPlatform and arbiterPlatform.Parent then
+        arbiterPlatform:Destroy()
+        arbiterPlatform = nil
+    end
 
     if game.PlaceId == SPECIFIC_PLACE_ID and not State.teleported then
         task.wait(1)
