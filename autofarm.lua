@@ -63,6 +63,7 @@ local cache = {
     workspaceUpdateInterval = 0.5
 }
 local arbiterPlatform = nil
+local arbiterSpawnConnection = nil
 local function createArbiterPlatform()
     if arbiterPlatform and arbiterPlatform.Parent then return end
     local part = Instance.new("Part")
@@ -237,7 +238,6 @@ local function findEnemies()
     local priorityEnemies = {}
     local hasArbiter = false
     local wasArbiterPresent = State.arbiterPresent
-    local arbiterData = nil
 
     for _, model in ipairs(cache.workspaceChildren) do
         if model:IsA("Model") and model.Parent == workspace then
@@ -266,7 +266,6 @@ local function findEnemies()
                         if enemyData.IsArbiter then
                             hasArbiter = true
                             enemyData.IsPriority = true
-                            arbiterData = enemyData
                         end
                      
                         if characterName == "Gilgamesh, the Consumer of Reality" or
@@ -685,39 +684,45 @@ local function farmingLoop()
     local recoveryCheckInterval = 5
 
     while State.isRunning and not State.bossCompleted do
-        local now = tick()
-        State.playerAlive = isPlayerAlive()
-    
-        if State.playerAlive then
-            if checkAutoTeleport() then
-                handleDungeonTeleport()
-                break
-            end
+        local loopSuccess = pcall(function()
+            local now = tick()
+            State.playerAlive = isPlayerAlive()
         
-            if now - lastBossCheck > bossCheckInterval then
-                local bossStatus = checkBossStatus()
-                if State.bossHasSpawned and (bossStatus == "dead" or bossStatus == "alrasid_dead") and not State.bossCompleted then
-                    if bossStatus ~= "alrasid_dead" then
-                        handleDungeonTeleport()
-                        break
-                    end
+            if State.playerAlive then
+                if checkAutoTeleport() then
+                    handleDungeonTeleport()
+                    return
                 end
-                lastBossCheck = now
-            end
-        
-            if now - lastRecoveryCheck > recoveryCheckInterval then
-                if State.shootingEnabled and State.isRunning and not State.bossCompleted and State.playerAlive then
-                    if tick() - State.lastFireTime > 10 then
-                        State.shootingErrors = State.shootingErrors + 2
+            
+                if now - lastBossCheck > bossCheckInterval then
+                    local bossStatus = checkBossStatus()
+                    if State.bossHasSpawned and (bossStatus == "dead" or bossStatus == "alrasid_dead") and not State.bossCompleted then
+                        if bossStatus ~= "alrasid_dead" then
+                            handleDungeonTeleport()
+                            return
+                        end
                     end
+                    lastBossCheck = now
                 end
-                lastRecoveryCheck = now
+            
+                if now - lastRecoveryCheck > recoveryCheckInterval then
+                    if State.shootingEnabled and State.isRunning and not State.bossCompleted and State.playerAlive then
+                        if tick() - State.lastFireTime > 10 then
+                            State.shootingErrors = State.shootingErrors + 2
+                        end
+                    end
+                    lastRecoveryCheck = now
+                end
+            
+                attemptFire()
+            else
+                State.currentTarget = nil
+                State.arbiterForceShoot = false
             end
-        
-            attemptFire()
-        else
-            State.currentTarget = nil
-            State.arbiterForceShoot = false
+        end)
+
+        if not loopSuccess then
+            task.wait(1)
         end
     
         RunService.Heartbeat:Wait()
@@ -764,6 +769,21 @@ local function initialize()
     player.CharacterAdded:Connect(onCharacterAdded)
     onCharacterAdded(player.Character)
 
+    arbiterSpawnConnection = workspace.ChildAdded:Connect(function(child)
+        if child.Name == "The Arbiter" and child:IsA("Model") then
+            task.spawn(function()
+                State.arbiterSpawnTime = tick()
+                State.arbiterPresent = true
+                createArbiterPlatform()
+                task.wait(2.5)
+                if not State.hasTeleportedToArbiterThisSpawn then
+                    State.hasTeleportedToArbiterThisSpawn = true
+                    teleportToArbiterPlatform()
+                end
+            end)
+        end
+    end)
+
     task.spawn(farmingLoop)
 
     task.spawn(function()
@@ -794,6 +814,10 @@ return {
     Stop = function()
         State.isRunning = false
         State.shootingEnabled = false
+        if arbiterSpawnConnection then
+            arbiterSpawnConnection:Disconnect()
+            arbiterSpawnConnection = nil
+        end
     end,
     Start = function()
         if not State.isRunning then
