@@ -5,6 +5,8 @@ local player = Players.LocalPlayer
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
+local TextChatService = game:GetService("TextChatService")
+local HttpService = game:GetService("HttpService")
 local CONFIG = {
     FIRE_RATE = 0.05,
     TOOL_NAME = "Equinox Cannon",
@@ -29,7 +31,12 @@ local CONFIG = {
     DUMMY_POSITION_SETTLE_TIME = 0.3,
     GIGATON_TOOL_NAME = "Gigaton Hammer",
     GIGATON_REMOTE_NAME = "RemoteFunction",
-    GIGATON_INTERVAL = 1
+    GIGATON_INTERVAL = 1,
+    WEBHOOK_URL = "",
+    LOOT_CHAT_DELAY = 2,
+    LOOT_GUI_SCAN_INTERVAL = 0.5,
+    LOOT_DUPLICATE_WINDOW = 2,
+    LOOT_MIN_TEXT_LENGTH = 5
 }
 local PRIORITY_ENEMIES = {
     ["The Arbiter"] = true,
@@ -119,6 +126,235 @@ local workspaceChildRemovedConnection = nil
 local playerChildAddedConnection = nil
 local characterHealthConnection = nil
 local teleportToArbiterPlatform
+local lootConnections = {}
+local lootRecentMessages = {}
+local lootMonitorStarted = false
+
+local function trimText(text)
+    if type(text) ~= "string" then
+        return nil
+    end
+
+    text = text:gsub("%[SERVER%]:%s*", "")
+    text = text:gsub("^%s*(.-)%s*$", "%1")
+    return text
+end
+
+local function extractObtainedItem(text)
+    text = trimText(text)
+    if not text or #text < CONFIG.LOOT_MIN_TEXT_LENGTH then
+        return nil
+    end
+
+    local lowered = string.lower(text)
+    local names = {player.Name}
+
+    if player.DisplayName and player.DisplayName ~= player.Name then
+        names[#names + 1] = player.DisplayName
+    end
+
+    for _, name in ipairs(names) do
+        local loweredName = string.lower(name)
+        local markers = {
+            loweredName .. " has obtained ",
+            '"' .. loweredName .. '" has obtained '
+        }
+
+        for _, marker in ipairs(markers) do
+            local startIndex, endIndex = lowered:find(marker, 1, true)
+
+            if startIndex then
+                local item = text:sub(endIndex + 1)
+                item = item:gsub("^%s+", "")
+                item = item:gsub("^[Aa][Nn]?%s+", "")
+                item = item:gsub('^"', "")
+                item = item:gsub('"[%s%!%.]*$', "")
+                item = item:gsub("[%s%!%.]+$", "")
+
+                if item ~= "" then
+                    return item
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function getWebhookRequestFunction()
+    if typeof(request) == "function" then
+        return request
+    end
+
+    if typeof(http_request) == "function" then
+        return http_request
+    end
+
+    if syn and typeof(syn.request) == "function" then
+        return syn.request
+    end
+
+    if http and typeof(http.request) == "function" then
+        return http.request
+    end
+
+    if fluxus and typeof(fluxus.request) == "function" then
+        return fluxus.request
+    end
+
+    return nil
+end
+
+local function sendLootWebhook(itemName)
+    if type(CONFIG.WEBHOOK_URL) ~= "string" or CONFIG.WEBHOOK_URL == "" then
+        return false
+    end
+
+    local payload = HttpService:JSONEncode({
+        content = "@everyone " .. player.Name .. " has obtained " .. itemName,
+        allowed_mentions = {
+            parse = {"everyone"}
+        }
+    })
+
+    local requestFunction = getWebhookRequestFunction()
+
+    if requestFunction then
+        local success = pcall(function()
+            requestFunction({
+                Url = CONFIG.WEBHOOK_URL,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json"
+                },
+                Body = payload
+            })
+        end)
+
+        if success then
+            return true
+        end
+    end
+
+    local success = pcall(function()
+        HttpService:PostAsync(
+            CONFIG.WEBHOOK_URL,
+            payload,
+            Enum.HttpContentType.ApplicationJson,
+            false
+        )
+    end)
+
+    return success
+end
+
+local function processLootMessage(message)
+    local itemName = extractObtainedItem(message)
+    if not itemName then
+        return false
+    end
+
+    local normalized = string.lower(trimText(message) or message)
+    local now = os.clock()
+    local lastProcessed = lootRecentMessages[normalized]
+
+    if lastProcessed and now - lastProcessed < CONFIG.LOOT_DUPLICATE_WINDOW then
+        return false
+    end
+
+    lootRecentMessages[normalized] = now
+
+    task.spawn(function()
+        sendLootWebhook(itemName)
+    end)
+
+    return true
+end
+
+local function connectLootTextChannel(channel)
+    if not channel or not channel:IsA("TextChannel") then
+        return
+    end
+
+    local connection = channel.MessageReceived:Connect(function(message)
+        if message then
+            processLootMessage(message.Text)
+        end
+    end)
+
+    lootConnections[#lootConnections + 1] = connection
+end
+
+local function startLootMonitor()
+    if lootMonitorStarted then
+        return
+    end
+
+    lootMonitorStarted = true
+
+    task.spawn(function()
+        task.wait(CONFIG.LOOT_CHAT_DELAY)
+
+        local textChannels = TextChatService:FindFirstChild("TextChannels")
+
+        if textChannels then
+            for _, channel in ipairs(textChannels:GetChildren()) do
+                connectLootTextChannel(channel)
+            end
+
+            local connection = textChannels.ChildAdded:Connect(function(channel)
+                connectLootTextChannel(channel)
+            end)
+
+            lootConnections[#lootConnections + 1] = connection
+        end
+    end)
+
+    task.spawn(function()
+        task.wait(CONFIG.LOOT_CHAT_DELAY)
+
+        local playerGui = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui", 10)
+        if not playerGui then
+            return
+        end
+
+        local seenTexts = {}
+
+        while lootMonitorStarted do
+            for _, descendant in ipairs(playerGui:GetDescendants()) do
+                if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+                    if descendant.Visible then
+                        local text = descendant.Text
+
+                        if type(text) == "string" and #text >= CONFIG.LOOT_MIN_TEXT_LENGTH then
+                            local oldText = seenTexts[descendant]
+
+                            if oldText ~= text then
+                                seenTexts[descendant] = text
+                                processLootMessage(text)
+                            end
+                        end
+                    end
+                end
+            end
+
+            task.wait(CONFIG.LOOT_GUI_SCAN_INTERVAL)
+        end
+    end)
+end
+
+local function stopLootMonitor()
+    lootMonitorStarted = false
+
+    for _, connection in ipairs(lootConnections) do
+        if connection and connection.Connected then
+            connection:Disconnect()
+        end
+    end
+
+    table.clear(lootConnections)
+    table.clear(lootRecentMessages)
+end
 local function createArbiterPlatform()
     if arbiterPlatform and arbiterPlatform.Parent then return end
     local part = Instance.new("Part")
@@ -356,25 +592,8 @@ local function isGilgameshEncounter()
 end
 
 local function isGilgameshPhase()
-    if isGilgameshEncounter() then
-        return true
-    end
-
-    if CONFIG.WAIT_FOR_GILGAMESH_AFTER_ALRASID then
-        if State.alrasidDead then
-            return true
-        end
-
-        local alrasid = workspace:FindFirstChild("Alrasid, Archbishop of the Equinox")
-        local humanoid = alrasid and alrasid:FindFirstChildOfClass("Humanoid")
-
-        if humanoid and humanoid.Health <= 0 then
-            State.alrasidDead = true
-            return true
-        end
-    end
-
-    return false
+    local map = workspace:FindFirstChild("Map")
+    return map ~= nil and map:FindFirstChild("NoVoid") ~= nil
 end
 
 local function sendSkipCommands()
@@ -1599,8 +1818,9 @@ local function farmingLoop()
                 end
 
                 local gilgameshEncounter = isGilgameshEncounter()
+                local gilgameshPhase = isGilgameshPhase()
 
-                if gilgameshEncounter then
+                if gilgameshPhase then
                     ensureCombatBuffSetup("Gilgamesh")
                 else
                     local startPositionReady = maintainStartPosition(now)
@@ -1611,7 +1831,7 @@ local function farmingLoop()
                 end
 
                 local lives = getLivesCount(now)
-                local allowLifeRetry = not (gilgameshEncounter and CONFIG.WAIT_FOR_GILGAMESH_AFTER_ALRASID)
+                local allowLifeRetry = not (gilgameshPhase and CONFIG.WAIT_FOR_GILGAMESH_AFTER_ALRASID)
 
                 if lives ~= nil and allowLifeRetry then
                     if lives <= 1 and not State.lifeTeleportTriggered then
@@ -1621,7 +1841,7 @@ local function farmingLoop()
                     elseif lives > 1 then
                         State.lifeTeleportTriggered = false
                     end
-                elseif gilgameshEncounter then
+                elseif gilgameshPhase then
                     State.lifeTeleportTriggered = false
                 end
 
@@ -1677,7 +1897,6 @@ end
 local function onCharacterAdded(character)
     State.hasTeleportedToArbiterThisSpawn = false
     State.arbiterSpawnTime = 0
-    State.alrasidDead = false
     State.currentTarget = nil
     State.currentTargetName = "None"
     State.arbiterPresent = false
@@ -1737,6 +1956,7 @@ local function initialize()
     onCharacterAdded(player.Character)
 
     primeGigatonHammer()
+    startLootMonitor()
 
     if workspaceChildAddedConnection then
         workspaceChildAddedConnection:Disconnect()
@@ -1832,6 +2052,7 @@ return {
 
         State.gigatonEnabled = false
         State.gigatonLoopStarted = false
+        stopLootMonitor()
 
     end,
     Start = function()
