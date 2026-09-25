@@ -7,6 +7,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
 local TextChatService = game:GetService("TextChatService")
 local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
 local CONFIG = {
     FIRE_RATE = 0.05,
     TOOL_NAME = "Equinox Cannon",
@@ -32,6 +33,7 @@ local CONFIG = {
     GIGATON_TOOL_NAME = "Gigaton Hammer",
     GIGATON_REMOTE_NAME = "RemoteFunction",
     GIGATON_INTERVAL = 1,
+    ESHEEP_COOLDOWN = 40,
     WEBHOOK_URL = "",
     LOOT_CHAT_DELAY = 2,
     LOOT_GUI_SCAN_INTERVAL = 0.5,
@@ -94,6 +96,9 @@ local State = {
     lastDummySetupAttempt = 0,
     gigatonLoopStarted = false,
     gigatonEnabled = false,
+    electricSheepUsed = false,
+    lastElectricSheepUse = 0,
+    disconnectWebhookSent = false,
     startPositionReady = false,
     startPositionStableSince = nil
 }
@@ -129,6 +134,8 @@ local teleportToArbiterPlatform
 local lootConnections = {}
 local lootRecentMessages = {}
 local lootMonitorStarted = false
+local disconnectConnections = {}
+local disconnectMonitorStarted = false
 
 local function trimText(text)
     if type(text) ~= "string" then
@@ -205,16 +212,28 @@ local function getWebhookRequestFunction()
     return nil
 end
 
-local function sendLootWebhook(itemName)
+local function sendWebhookMessage(message, pingEveryone)
     if type(CONFIG.WEBHOOK_URL) ~= "string" or CONFIG.WEBHOOK_URL == "" then
         return false
     end
 
+    if type(message) ~= "string" or message == "" then
+        return false
+    end
+
+    local content = message
+    local allowedMentions = {
+        parse = {}
+    }
+
+    if pingEveryone then
+        content = "@everyone " .. content
+        allowedMentions.parse = {"everyone"}
+    end
+
     local payload = HttpService:JSONEncode({
-        content = "@everyone " .. player.Name .. " has obtained " .. itemName,
-        allowed_mentions = {
-            parse = {"everyone"}
-        }
+        content = content,
+        allowed_mentions = allowedMentions
     })
 
     local requestFunction = getWebhookRequestFunction()
@@ -248,6 +267,33 @@ local function sendLootWebhook(itemName)
     return success
 end
 
+local function sendLootWebhook(itemName)
+    return sendWebhookMessage(
+        player.Name .. " has obtained " .. itemName,
+        true
+    )
+end
+
+local function sendStatusWebhook(message)
+    return sendWebhookMessage(message, false)
+end
+
+local function sendBossKilledWebhook(bossName)
+    if bossName == "The Arbiter" then
+        return sendStatusWebhook("The Arbiter has been killed")
+    end
+
+    if bossName == "Alrasid, Archbishop of the Equinox" then
+        return sendStatusWebhook("Alrasid has been killed")
+    end
+
+    if bossName == CONFIG.GILGAMESH_NAME then
+        return sendStatusWebhook("Gilgamesh has been killed")
+    end
+
+    return false
+end
+
 local function processLootMessage(message)
     local itemName = extractObtainedItem(message)
     if not itemName then
@@ -269,6 +315,135 @@ local function processLootMessage(message)
     end)
 
     return true
+end
+
+local function getDisconnectReason()
+    local promptGui = CoreGui:FindFirstChild("RobloxPromptGui", true)
+
+    if not promptGui then
+        return nil
+    end
+
+    local parts = {}
+    local seen = {}
+    local hasDisconnectText = false
+
+    for _, object in ipairs(promptGui:GetDescendants()) do
+        if object:IsA("TextLabel") or object:IsA("TextButton") then
+            local value = object.Text
+
+            if type(value) == "string" then
+                value = value:gsub("^%s+", ""):gsub("%s+$", "")
+
+                if value ~= "" then
+                    local lowered = string.lower(value)
+
+                    if lowered:find("disconnect", 1, true)
+                        or lowered:find("kicked", 1, true)
+                        or lowered:find("connection", 1, true)
+                        or lowered:find("error code", 1, true)
+                        or lowered:find("same account", 1, true)
+                        or lowered:find("internet", 1, true)
+                        or lowered:find("server", 1, true) and lowered:find("closed", 1, true) then
+
+                        hasDisconnectText = true
+                    end
+
+                    if not seen[value]
+                        and value ~= "Leave"
+                        and value ~= "Reconnect"
+                        and value ~= "Close"
+                        and value ~= "OK" then
+
+                        seen[value] = true
+                        parts[#parts + 1] = value
+                    end
+                end
+            end
+        end
+    end
+
+    if not hasDisconnectText then
+        return nil
+    end
+
+    if #parts == 0 then
+        return "Unknown reason"
+    end
+
+    return table.concat(parts, " | ")
+end
+
+local function sendDisconnectWebhook(reason)
+    if State.disconnectWebhookSent then
+        return
+    end
+
+    State.disconnectWebhookSent = true
+
+    if type(reason) ~= "string" or reason == "" then
+        reason = "Unknown reason"
+    end
+
+    task.spawn(function()
+        sendStatusWebhook(
+            player.Name
+                .. " got disconnected/kicked. Reason: "
+                .. reason
+        )
+    end)
+end
+
+local function checkDisconnectPrompt()
+    if State.disconnectWebhookSent then
+        return
+    end
+
+    local reason = getDisconnectReason()
+
+    if reason then
+        sendDisconnectWebhook(reason)
+    end
+end
+
+local function startDisconnectMonitor()
+    if disconnectMonitorStarted then
+        return
+    end
+
+    disconnectMonitorStarted = true
+    State.disconnectWebhookSent = false
+
+    disconnectConnections[#disconnectConnections + 1] =
+        CoreGui.DescendantAdded:Connect(function()
+            task.delay(0.25, checkDisconnectPrompt)
+        end)
+
+    disconnectConnections[#disconnectConnections + 1] =
+        Players.PlayerRemoving:Connect(function(leavingPlayer)
+            if leavingPlayer == player then
+                task.delay(0.05, function()
+                    local reason = getDisconnectReason()
+                    sendDisconnectWebhook(
+                        reason or "Player was removed from the game"
+                    )
+                end)
+            end
+        end)
+
+    task.defer(checkDisconnectPrompt)
+end
+
+local function stopDisconnectMonitor()
+    disconnectMonitorStarted = false
+
+    for _, connection in ipairs(disconnectConnections) do
+        if connection and connection.Connected then
+            connection:Disconnect()
+        end
+    end
+
+    table.clear(disconnectConnections)
 end
 
 local function connectLootTextChannel(channel)
@@ -452,6 +627,25 @@ local function removeEnemyModel(model)
         return
     end
 
+    local data = cache.enemyData[model]
+
+    if data
+        and data.Humanoid
+        and data.Humanoid.Health <= 0
+        and not data.DeathWebhookSent
+        and (
+            model.Name == "The Arbiter"
+            or model.Name == "Alrasid, Archbishop of the Equinox"
+            or model.Name == CONFIG.GILGAMESH_NAME
+        ) then
+
+        data.DeathWebhookSent = true
+
+        task.spawn(function()
+            sendBossKilledWebhook(model.Name)
+        end)
+    end
+
     local lastIndex = #cache.enemyModels
     local lastModel = cache.enemyModels[lastIndex]
 
@@ -518,6 +712,31 @@ local function registerEnemyModel(model)
     cache.enemyModels[#cache.enemyModels + 1] = model
     cache.enemyIndex[model] = #cache.enemyModels
     cache.enemyData[model] = data
+
+    if name == "The Arbiter"
+        or name == "Alrasid, Archbishop of the Equinox"
+        or name == CONFIG.GILGAMESH_NAME then
+
+        data.DeathWebhookSent = false
+
+        local function reportBossDeath()
+            if data.DeathWebhookSent then
+                return
+            end
+
+            data.DeathWebhookSent = true
+
+            task.spawn(function()
+                sendBossKilledWebhook(name)
+            end)
+        end
+
+        humanoid.Died:Connect(reportBossDeath)
+
+        if humanoid.Health <= 0 then
+            task.defer(reportBossDeath)
+        end
+    end
 
     if isBossName(name) then
         State.bossHasSpawned = true
@@ -1075,6 +1294,473 @@ local function equipTool(force)
     return false
 end
 
+ElectricSheep = {
+    enabled = true,
+    SLEEP_ANIMATION_ID = "17234446600",
+    sleeping = false,
+    sleepStartTime = 0,
+    character = nil,
+    humanoid = nil,
+    animator = nil,
+    backpack = nil,
+    toolBeforeSleep = nil,
+    restoredInitialTool = false,
+    connections = {},
+    normalSleepTrack = nil
+}
+
+function ElectricSheep.disconnectCharacterConnections()
+    for _, connection in ipairs(ElectricSheep.connections) do
+        if connection and connection.Connected then
+            connection:Disconnect()
+        end
+    end
+
+    table.clear(ElectricSheep.connections)
+end
+
+function ElectricSheep.getAnimationId(track)
+    if not track then
+        return nil
+    end
+
+    local id = nil
+
+    pcall(function()
+        id = track.Animation.AnimationId
+    end)
+
+    if type(id) ~= "string" then
+        return nil
+    end
+
+    return id:match("%d+")
+end
+
+function ElectricSheep.stopSleepTrack(track)
+    if ElectricSheep.getAnimationId(track) ~= ElectricSheep.SLEEP_ANIMATION_ID then
+        return
+    end
+
+    pcall(function()
+        track:Stop(0)
+    end)
+end
+
+function ElectricSheep.stopExistingSleepAnimation()
+    if not ElectricSheep.animator then
+        return
+    end
+
+    for _, track in ipairs(ElectricSheep.animator:GetPlayingAnimationTracks()) do
+        ElectricSheep.stopSleepTrack(track)
+    end
+end
+
+function ElectricSheep.stopNormalSleepTrack()
+    if ElectricSheep.normalSleepTrack then
+        pcall(function()
+            ElectricSheep.normalSleepTrack:Stop(0)
+        end)
+
+        ElectricSheep.normalSleepTrack = nil
+    end
+end
+
+function ElectricSheep.hasFullSet()
+    local backpack = player:FindFirstChild("Backpack")
+
+    if not backpack then
+        return false, false, false
+    end
+
+    local armourModel = backpack:FindFirstChild("OriginalArmourModel")
+
+    if not armourModel then
+        return false, false, false
+    end
+
+    local head2 = armourModel:FindFirstChild("Head2")
+    local torso2 = armourModel:FindFirstChild("Torso2")
+    local torus = head2 and head2:FindFirstChild("Torus")
+    local plane = torso2 and torso2:FindFirstChild("Plane")
+
+    local hasHorns = torus ~= nil
+    local hasArmour = false
+
+    if plane and plane:IsA("BasePart") then
+        local color = plane.Color
+        local r = math.floor(color.R * 255 + 0.5)
+        local g = math.floor(color.G * 255 + 0.5)
+        local b = math.floor(color.B * 255 + 0.5)
+
+        hasArmour = r == 135 and g == 110 and b == 209
+    end
+
+    return hasArmour and hasHorns, hasArmour, hasHorns
+end
+
+function ElectricSheep.cancelPlatformStand()
+    if not ElectricSheep.enabled
+        or not ElectricSheep.sleeping
+        or not ElectricSheep.humanoid
+        or not ElectricSheep.humanoid.Parent then
+
+        return
+    end
+
+    if ElectricSheep.humanoid.PlatformStand then
+        ElectricSheep.humanoid.PlatformStand = false
+    end
+
+    if ElectricSheep.humanoid:GetState() == Enum.HumanoidStateType.PlatformStanding then
+        pcall(function()
+            ElectricSheep.humanoid:ChangeState(Enum.HumanoidStateType.Running)
+        end)
+    end
+end
+
+function ElectricSheep.removeTooSnoozing()
+    if not ElectricSheep.enabled or not ElectricSheep.character then
+        return
+    end
+
+    local object = ElectricSheep.character:FindFirstChild("TooSnoozing")
+
+    if object and object:IsA("LocalScript") then
+        pcall(function()
+            object:Destroy()
+        end)
+    end
+end
+
+function ElectricSheep.restoreInitialTool()
+    if not ElectricSheep.enabled
+        or not ElectricSheep.sleeping
+        or ElectricSheep.restoredInitialTool
+        or not ElectricSheep.toolBeforeSleep
+        or not ElectricSheep.backpack
+        or not ElectricSheep.humanoid
+        or ElectricSheep.humanoid.Health <= 0 then
+
+        return
+    end
+
+    if ElectricSheep.toolBeforeSleep.Parent ~= ElectricSheep.backpack then
+        return
+    end
+
+    ElectricSheep.restoredInitialTool = true
+
+    pcall(function()
+        ElectricSheep.humanoid:EquipTool(ElectricSheep.toolBeforeSleep)
+    end)
+
+    cache.toolData = nil
+end
+
+function ElectricSheep.beginSleep()
+    if not ElectricSheep.enabled
+        or ElectricSheep.sleeping
+        or not ElectricSheep.character
+        or not ElectricSheep.humanoid then
+
+        return
+    end
+
+    ElectricSheep.sleeping = true
+    ElectricSheep.sleepStartTime = os.clock()
+    ElectricSheep.toolBeforeSleep = ElectricSheep.character:FindFirstChildOfClass("Tool")
+    ElectricSheep.restoredInitialTool = false
+
+    ElectricSheep.stopNormalSleepTrack()
+    ElectricSheep.removeTooSnoozing()
+    ElectricSheep.cancelPlatformStand()
+    ElectricSheep.stopExistingSleepAnimation()
+
+    task.spawn(function()
+        local restoreDeadline = os.clock() + 1.25
+
+        while ElectricSheep.enabled
+            and ElectricSheep.sleeping
+            and ElectricSheep.character
+            and ElectricSheep.character.Parent do
+
+            ElectricSheep.cancelPlatformStand()
+            ElectricSheep.stopExistingSleepAnimation()
+            ElectricSheep.removeTooSnoozing()
+
+            if not ElectricSheep.restoredInitialTool
+                and os.clock() <= restoreDeadline then
+
+                ElectricSheep.restoreInitialTool()
+            end
+
+            task.wait(0.03)
+        end
+    end)
+end
+
+function ElectricSheep.endSleep()
+    ElectricSheep.sleeping = false
+    ElectricSheep.toolBeforeSleep = nil
+    ElectricSheep.restoredInitialTool = false
+    ElectricSheep.stopNormalSleepTrack()
+end
+
+function ElectricSheep.restoreNormalSleep()
+    ElectricSheep.sleeping = false
+    ElectricSheep.stopNormalSleepTrack()
+
+    if not ElectricSheep.character
+        or not ElectricSheep.humanoid
+        or not ElectricSheep.humanoid.Parent
+        or not ElectricSheep.character:FindFirstChild("ESheepSleeping") then
+
+        ElectricSheep.toolBeforeSleep = nil
+        ElectricSheep.restoredInitialTool = false
+        return
+    end
+
+    pcall(function()
+        ElectricSheep.humanoid:UnequipTools()
+    end)
+
+    ElectricSheep.humanoid.PlatformStand = true
+
+    if ElectricSheep.animator then
+        pcall(function()
+            local animation = Instance.new("Animation")
+            animation.AnimationId = "rbxassetid://" .. ElectricSheep.SLEEP_ANIMATION_ID
+
+            local track = ElectricSheep.animator:LoadAnimation(animation)
+            track.Priority = Enum.AnimationPriority.Action
+            track:Play(0)
+
+            ElectricSheep.normalSleepTrack = track
+            animation:Destroy()
+        end)
+    end
+
+    ElectricSheep.toolBeforeSleep = nil
+    ElectricSheep.restoredInitialTool = false
+end
+
+function ElectricSheep.setupCharacter(character)
+    ElectricSheep.disconnectCharacterConnections()
+    ElectricSheep.stopNormalSleepTrack()
+
+    ElectricSheep.character = character
+    ElectricSheep.humanoid = character and character:FindFirstChildOfClass("Humanoid") or nil
+    ElectricSheep.backpack = player:FindFirstChild("Backpack")
+    ElectricSheep.animator = ElectricSheep.humanoid and ElectricSheep.humanoid:FindFirstChildOfClass("Animator") or nil
+    ElectricSheep.sleeping = false
+    ElectricSheep.toolBeforeSleep = nil
+    ElectricSheep.restoredInitialTool = false
+
+    if not ElectricSheep.character then
+        return
+    end
+
+    if not ElectricSheep.humanoid then
+        ElectricSheep.humanoid = ElectricSheep.character:WaitForChild("Humanoid", 5)
+    end
+
+    if not ElectricSheep.humanoid then
+        return
+    end
+
+    if not ElectricSheep.backpack then
+        ElectricSheep.backpack = player:WaitForChild("Backpack", 5)
+    end
+
+    if not ElectricSheep.animator then
+        ElectricSheep.animator = ElectricSheep.humanoid:WaitForChild("Animator", 5)
+    end
+
+    table.insert(
+        ElectricSheep.connections,
+        ElectricSheep.character.ChildAdded:Connect(function(child)
+            if child.Name == "ESheepSleeping" then
+                ElectricSheep.beginSleep()
+                return
+            end
+
+            if child.Name == "TooSnoozing"
+                and child:IsA("LocalScript")
+                and ElectricSheep.enabled then
+
+                if not ElectricSheep.sleeping then
+                    ElectricSheep.beginSleep()
+                end
+
+                task.defer(function()
+                    if ElectricSheep.enabled and child.Parent then
+                        child:Destroy()
+                    end
+                end)
+
+                return
+            end
+
+            if child.Name == "ESheepBoost" then
+                ElectricSheep.endSleep()
+            end
+        end)
+    )
+
+    table.insert(
+        ElectricSheep.connections,
+        ElectricSheep.character.ChildRemoved:Connect(function(child)
+            if child.Name == "ESheepSleeping" then
+                ElectricSheep.endSleep()
+                return
+            end
+
+            if ElectricSheep.enabled
+                and ElectricSheep.sleeping
+                and child == ElectricSheep.toolBeforeSleep
+                and not ElectricSheep.restoredInitialTool
+                and os.clock() - ElectricSheep.sleepStartTime < 1.25 then
+
+                task.delay(0.03, ElectricSheep.restoreInitialTool)
+            end
+        end)
+    )
+
+    table.insert(
+        ElectricSheep.connections,
+        ElectricSheep.humanoid:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+            if ElectricSheep.enabled
+                and ElectricSheep.sleeping
+                and ElectricSheep.humanoid.PlatformStand then
+
+                task.defer(ElectricSheep.cancelPlatformStand)
+            end
+        end)
+    )
+
+    table.insert(
+        ElectricSheep.connections,
+        ElectricSheep.humanoid.StateChanged:Connect(function(_, newState)
+            if ElectricSheep.enabled
+                and ElectricSheep.sleeping
+                and newState == Enum.HumanoidStateType.PlatformStanding then
+
+                task.defer(ElectricSheep.cancelPlatformStand)
+            end
+        end)
+    )
+
+    if ElectricSheep.animator then
+        table.insert(
+            ElectricSheep.connections,
+            ElectricSheep.animator.AnimationPlayed:Connect(function(track)
+                if ElectricSheep.enabled
+                    and ElectricSheep.sleeping
+                    and ElectricSheep.getAnimationId(track) == ElectricSheep.SLEEP_ANIMATION_ID then
+
+                    task.defer(function()
+                        ElectricSheep.stopSleepTrack(track)
+                    end)
+                end
+            end)
+        )
+    end
+
+    if ElectricSheep.enabled
+        and ElectricSheep.character:FindFirstChild("ESheepSleeping") then
+
+        ElectricSheep.beginSleep()
+    end
+end
+
+function ElectricSheep.useAbility()
+    if not ElectricSheep.enabled
+        or not State.isRunning
+        or State.specialMode
+        or State.bossCompleted
+        or not State.playerAlive then
+
+        return false
+    end
+
+    local character = player.Character
+
+    if not character or character ~= ElectricSheep.character then
+        ElectricSheep.setupCharacter(character)
+    end
+
+    if not character then
+        return false
+    end
+
+    if character:FindFirstChild("ESheepSleeping")
+        or character:FindFirstChild("ESheepWakeUp")
+        or player:FindFirstChild("ESheepAbilityCD") then
+
+        return false
+    end
+
+    local hasFullSet = ElectricSheep.hasFullSet()
+
+    if not hasFullSet then
+        return false
+    end
+
+    local remote = character:FindFirstChild("AbilityMain")
+
+    if not remote or not remote:IsA("RemoteEvent") then
+        return false
+    end
+
+    local success = pcall(function()
+        remote:FireServer(character)
+    end)
+
+    if success then
+        State.electricSheepUsed = true
+        State.lastElectricSheepUse = tick()
+        return true
+    end
+
+    return false
+end
+
+function ElectricSheep.maybeUse(now)
+    if not ElectricSheep.enabled
+        or not State.isRunning
+        or not State.shootingEnabled
+        or not State.playerAlive
+        or State.specialMode
+        or State.bossCompleted then
+
+        return false
+    end
+
+    if State.electricSheepUsed
+        and now - State.lastElectricSheepUse < CONFIG.ESHEEP_COOLDOWN then
+
+        return false
+    end
+
+    return ElectricSheep.useAbility()
+end
+
+function ElectricSheep.shutdown()
+    ElectricSheep.enabled = false
+
+    if ElectricSheep.character
+        and ElectricSheep.character:FindFirstChild("ESheepSleeping") then
+
+        ElectricSheep.restoreNormalSleep()
+    else
+        ElectricSheep.endSleep()
+    end
+
+    ElectricSheep.disconnectCharacterConnections()
+end
+
 local function findToolAnywhere(toolName)
     local character = player.Character
 
@@ -1570,6 +2256,7 @@ local function attemptFire()
 
     if fireSuccess then
         State.shootingErrors = 0
+        ElectricSheep.maybeUse(now)
         return
     end
 
@@ -1907,6 +2594,8 @@ local function onCharacterAdded(character)
     State.dummyContext = nil
     State.lastDummySetupAttempt = 0
     State.gigatonEnabled = false
+    State.electricSheepUsed = false
+    State.lastElectricSheepUse = 0
     State.startPositionReady = false
     State.startPositionStableSince = nil
     cache.simulationDummy = nil
@@ -1941,6 +2630,9 @@ local function onCharacterAdded(character)
     State.shootingEnabled = true
     State.shootingErrors = 0
 
+    ElectricSheep.enabled = true
+    ElectricSheep.setupCharacter(character)
+
     refreshEnemyModels(true)
 end
 local function initialize()
@@ -1957,6 +2649,7 @@ local function initialize()
 
     primeGigatonHammer()
     startLootMonitor()
+    startDisconnectMonitor()
 
     if workspaceChildAddedConnection then
         workspaceChildAddedConnection:Disconnect()
@@ -2052,13 +2745,19 @@ return {
 
         State.gigatonEnabled = false
         State.gigatonLoopStarted = false
+        ElectricSheep.shutdown()
         stopLootMonitor()
+        stopDisconnectMonitor()
 
     end,
     Start = function()
         if not State.isRunning then
             State.isRunning = true
             State.shootingEnabled = true
+            ElectricSheep.enabled = true
+            ElectricSheep.setupCharacter(player.Character)
+            startLootMonitor()
+            startDisconnectMonitor()
             task.spawn(farmingLoop)
         end
     end,
@@ -2099,7 +2798,12 @@ return {
             DummySetupCompleted = State.dummySetupCompleted,
             DummyShieldEnabled = State.dummyShieldEnabled,
             DummyContext = State.dummyContext or "None",
-            GigatonEnabled = State.gigatonEnabled
+            GigatonEnabled = State.gigatonEnabled,
+            ElectricSheepEnabled = ElectricSheep.enabled,
+            ElectricSheepUsed = State.electricSheepUsed,
+            ElectricSheepSleeping = ElectricSheep.sleeping,
+            LastElectricSheepUse = State.lastElectricSheepUse,
+            ElectricSheepHasFullSet = ElectricSheep.hasFullSet()
         }
     end,
     TriggerDungeon = function()
